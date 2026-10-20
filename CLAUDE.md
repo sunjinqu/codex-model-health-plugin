@@ -16,6 +16,8 @@ cargo install --git https://github.com/zyycn/codex-proxy-rs.git --rev fef52b3717
   --locked --root .tools/cpr-cli codex-proxy-plugin-cli
 CPR_PLUGIN_BIN="$PWD/.tools/cpr-cli/bin/cpr-plugin" ./scripts/build-linux.sh         # amd64 + arm64 → dist/*.tar.gz (+ .sha256)
 CPR_PLUGIN_BIN="$PWD/.tools/cpr-cli/bin/cpr-plugin" ./scripts/build-linux.sh arm64   # one arch; per-arch dirs .build/{engine,linux-target}-<arch>
+# Preferred for releases (no local disk use): .github/workflows/build.yml runs `build-linux.sh arm64` on ubuntu-24.04-arm.
+# Pushing tag v<plugin.json version> publishes/overwrites that Release's assets; workflow_dispatch only uploads an artifact.
 
 # Frontend (Node 24+, pnpm 10.10)
 pnpm --dir frontend install --frozen-lockfile

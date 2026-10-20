@@ -1,0 +1,85 @@
+# 在 GitHub 的 ARM64 原生 runner 上构建插件包，本地无需 Docker 镜像与编译缓存。
+# - 推送 v* 标签：构建、测试、冒烟验收后发布到同名 Release（标签须与 plugin.json 版本一致）
+# - Actions 页面手动运行：只构建验收，安装包作为 workflow artifact 下载，不改动 Release
+name: Build ARM64 package
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      CPR_REV: fef52b3717019513108733549508377a309f129d
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10.10.0
+
+      - name: Check tag matches plugin.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION="$(node -p "require('./plugin.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::标签 $GITHUB_REF_NAME 与 plugin.json 版本 $VERSION 不一致"
+            exit 1
+          fi
+
+      - name: Cache packaging CLI
+        id: cli-cache
+        uses: actions/cache@v6
+        with:
+          path: .tools/cpr-cli
+          key: cpr-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.CPR_REV }}
+
+      # 与插件同一 Rust 镜像编译打包 CLI，runner 上不必另装 Rust。
+      - name: Install packaging CLI
+        if: steps.cli-cache.outputs.cache-hit != 'true'
+        run: |
+          docker run --rm -v "$PWD/.tools:/tools" rust:1.97-slim-bookworm \
+            cargo install --git https://github.com/zyycn/codex-proxy-rs.git --rev "$CPR_REV" \
+            --locked --root /tools/cpr-cli codex-proxy-plugin-cli
+
+      - name: Build, test and package
+        run: CPR_PLUGIN_BIN="$PWD/.tools/cpr-cli/bin/cpr-plugin" ./scripts/build-linux.sh arm64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-linux-arm64
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          PACKAGE="local.model-health-$VERSION-aarch64-unknown-linux-gnu.tar.gz"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+          else
+            cat > release-notes.md <<EOF
+          提供 **Linux ARM64（aarch64）** 安装包，由 GitHub Actions 构建并通过离线协议冒烟验收。
+
+          **适用平台**：Linux aarch64，glibc 2.36+（如 Debian 12、Ubuntu 24.04）；宿主 Codex Proxy RS \`>=3.19.0, <4.0.0\`。
+
+          **安装**：插件管理 → 安装插件 → GitHub，仓库填 \`$GITHUB_REPOSITORY\`、版本标签 \`$TAG\`，选择 \`$PACKAGE\`。也可下载后通过「上传包」安装；不要上传 GitHub 自动生成的 Source code 压缩包。
+
+          **校验**：\`sha256sum -c $PACKAGE.sha256\`
+          EOF
+            gh release create "$TAG" dist/*.tar.gz dist/*.sha256 --title "$TAG · Linux ARM64" --notes-file release-notes.md
+          fi

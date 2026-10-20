@@ -105,6 +105,13 @@ pnpm --dir frontend build
 
 `build-linux.sh` 按参数中的架构（`amd64` / `arm64`，不带参数时两者都构建）在 Docker 中构建内嵌 Python/NumPy 引擎、运行 Rust 的 `bundled-engine` 单测、编译 Linux 二进制、构建页面，最后使用官方 CLI 生成 `dist/*-x86_64-unknown-linux-gnu.tar.gz` / `dist/*-aarch64-unknown-linux-gnu.tar.gz` 与校验文件。与宿主 CPU 不同的架构通过 Docker 的 QEMU / Rosetta 模拟构建，速度较慢。冒烟测试会核对 `bin/plugin` 的 ELF 架构与包目标一致，并在对应架构的容器中运行。打包后在非 root、空环境、只读根目录和 `/tmp:noexec` 容器中运行离线协议验收；默认使用 `debian:bookworm-slim`，可通过 `SMOKE_IMAGE` 指定已准备好的 Debian 12 兼容镜像。
 
+### GitHub Actions 自动构建
+
+不想占用本地空间时，用 [.github/workflows/build.yml](.github/workflows/build.yml) 在 GitHub 的 ARM64 原生 runner 上执行同一个 `build-linux.sh arm64`，本地不需要 Docker、Rust 或前端依赖：
+
+- 先把 `plugin.json` 等文件的版本号改好并推送，再推送同版本标签（如 `git tag v0.2.3 && git push origin v0.2.3`）。工作流会自动构建、测试、冒烟验收，并发布到同名 Release；Release 已存在时覆盖其中的安装包。标签与 `plugin.json` 版本不一致时直接失败。
+- 在仓库 Actions 页面手动运行「Build ARM64 package」只做构建验收，安装包作为 artifact 下载，不改动 Release。
+
 直接运行不带 `bundled-engine` 的本机 `cargo test` 另依赖开发用 `meow-llm-detector:4.5.4` Docker 镜像；首次构建优先使用上面的完整脚本，无需这个额外镜像。
 
 浏览器预览显式标注「模拟」，生产构建会剔除模拟宿主与模拟数据模块。`scripts/browser-qa.mjs` 支持 `PLAYWRIGHT_PATH`、`CHROME_BINARY`、`PREVIEW_URL`，检查双方法切换、选择保留、报告隔离、开始→暂停→继续→结束→历史，以及浅/深/窄屏、空/错/加载状态。`scripts/updates-browser-qa.mjs` 使用相同环境变量，验证来源地址、更新检查状态和检查失败时模型表单仍可使用，并在 `sandbox="allow-scripts"` 的隔离页面验证生产资源与地址复制。
