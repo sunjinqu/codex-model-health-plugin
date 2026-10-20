@@ -44,7 +44,12 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
     manifest = json.loads((root / "plugin.json").read_text())
     for path, digest in manifest["package"]["files"].items():
         assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest, path
-    assert (root / "bin/plugin").read_bytes()[:4] == b"\x7fELF"
+    # 打包 CLI 不校验二进制架构；这里核对 ELF e_machine 与包目标一致，并在同架构容器中运行。
+    target = manifest["package"]["target"]
+    assert target["os"] == "linux", target
+    platform, machine = {"x86_64": ("linux/amd64", 0x3E), "aarch64": ("linux/arm64", 0xB7)}[target["architecture"]]
+    binary = (root / "bin/plugin").read_bytes()
+    assert binary[:4] == b"\x7fELF" and struct.unpack_from("<H", binary, 18)[0] == machine, target
     html = (root / "web/index.html").read_text()
     assert '<script defer src="./app.js"></script>' in html and 'type="module"' not in html
     javascript = (root / "web/app.js").read_text()
@@ -53,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
     # 只读根文件系统与 /tmp:noexec 保持实际部署条件，不能为了测试放开 /tmp。
     root.chmod(0o755)
     container = f"model-health-smoke-{os.getpid()}"
-    command = ["docker", "run", "--rm", "--name", container, "-i", "--platform", "linux/amd64",
+    command = ["docker", "run", "--rm", "--name", container, "-i", "--platform", platform,
                "--network", "none", "--read-only", "--user", "10001:10001",
                "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
                "--tmpfs", "/package:rw,exec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700",

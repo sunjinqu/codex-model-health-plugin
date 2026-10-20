@@ -34,16 +34,20 @@ impl Engine {
 
     #[cfg(feature = "bundled-engine")]
     pub fn bundled() -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::{
             io::Write,
             os::unix::fs::{DirBuilderExt, OpenOptionsExt},
         };
         // 宿主 cwd 是本次插件实例的私有包目录，退出后由宿主回收。
         // /tmp 在正式容器中为 noexec；引擎及其动态库都应位于插件执行目录。
+        // 进程内序号防止同一进程并发创建实例（如并行测试）时纳秒时间戳相同而目录冲突。
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::current_dir()?.join(format!(
-            ".model-health-{}-{}",
+            ".model-health-{}-{}-{}",
             std::process::id(),
-            crate::now_nanos()
+            crate::now_nanos(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let path = directory.join("meow-engine");
@@ -78,13 +82,25 @@ impl Engine {
                 // PyInstaller onefile 也会解压动态库，不能再使用系统 /tmp。
                 command.env("TMPDIR", directory);
             }
-            let mut child = command
+            command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| fault(format!("检测引擎启动失败：{e}")))?;
+                .kill_on_drop(true);
+            // 同一进程内多个实例并发解压时（如并行测试），其他线程 fork 的子进程可能在 exec 前
+            // 短暂继承引擎文件的写句柄，此时 exec 返回 ETXTBSY；等子进程 exec 后重试即可。
+            let mut retries = 0;
+            let mut child = loop {
+                match command.spawn() {
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::ExecutableFileBusy && retries < 10 =>
+                    {
+                        retries += 1;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    result => break result.map_err(|e| fault(format!("检测引擎启动失败：{e}")))?,
+                }
+            };
             let input = child
                 .stdin
                 .take()
