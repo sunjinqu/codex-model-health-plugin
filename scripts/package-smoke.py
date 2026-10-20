@@ -1,4 +1,4 @@
-"""Exercise the packaged executable over SDK v2; public GitHub checks are opt-in."""
+"""Exercise the packaged executable over plugin protocol 4; public GitHub checks are opt-in."""
 import hashlib
 import json
 import os
@@ -344,7 +344,7 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
         send({"type": "shutdown"})
         process.wait(timeout=15)
         assert process.returncode == 0, process.stderr.read().decode()
-        print("PACKAGE PASS: hashes=PASS; tmp_noexec=PASS; nonroot=PASS; empty_env=PASS; readonly_root=PASS; sdk_v2=PASS; engine=4.5.4; accounts=1; keys=1; error_http=400; real_model_calls=0")
+        print(f"PACKAGE PASS: hashes=PASS; tmp_noexec=PASS; nonroot=PASS; empty_env=PASS; readonly_root=PASS; protocol={PROTOCOL_VERSION}; engine=4.5.4; accounts=1; keys=1; error_http=400; real_model_calls=0")
     finally:
         if process.poll() is None:
             subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
