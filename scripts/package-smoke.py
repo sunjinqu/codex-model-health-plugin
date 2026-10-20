@@ -1,38 +1,18 @@
-"""Exercise the packaged executable over plugin protocol 4; public GitHub checks are opt-in."""
+"""Exercise the packaged executable over plugin protocol 4 against an offline host fixture."""
 import hashlib
 import json
 import os
-import re
 import select
 import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 package = Path(sys.argv[1]).resolve()
-continuous = "--continuous" in sys.argv[2:]
-modeltrace = "--modeltrace" in sys.argv[2:]
-updates_live = "--updates-live" in sys.argv[2:]
-updates = "--updates" in sys.argv[2:] or updates_live
 # 与 backend/Cargo.toml 固定的宿主 SDK 提交一致（codex-proxy-rs v3.29.6）
 PROTOCOL_VERSION = 4
-
-
-def assert_same(actual, expected, path="run"):
-    if isinstance(actual, dict) and isinstance(expected, dict):
-        assert actual.keys() == expected.keys(), path
-        for key in actual:
-            assert_same(actual[key], expected[key], f"{path}.{key}")
-    elif isinstance(actual, list) and isinstance(expected, list):
-        assert len(actual) == len(expected), path
-        for i, (a, b) in enumerate(zip(actual, expected)):
-            assert_same(a, b, f"{path}[{i}]")
-    else:
-        assert actual == expected, f"{path}: restored={actual!r}; original={expected!r}"
 
 with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
     root = Path(directory).resolve()
@@ -46,6 +26,7 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
     manifest = json.loads((root / "plugin.json").read_text())
     for path, digest in manifest["package"]["files"].items():
         assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest, path
+    assert [s["namespace"] for s in manifest["state"]] == ["runs", "candy"], "legacy runs namespace must stay declared"
     # 打包 CLI 不校验二进制架构；这里核对 ELF e_machine 与包目标一致，并在同架构容器中运行。
     target = manifest["package"]["target"]
     assert target["os"] == "linux", target
@@ -55,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
     html = (root / "web/index.html").read_text()
     assert '<script defer src="./app.js"></script>' in html and 'type="module"' not in html
     javascript = (root / "web/app.js").read_text()
-    assert "preview-request-" not in javascript and "demo-a" not in javascript
+    assert "preview-request-" not in javascript and "demo-k" not in javascript
     # 按宿主 PreparedPackage / ProcessSpec 合同准备：私有可写包目录、非 root、空环境。
     # 只读根文件系统与 /tmp:noexec 保持实际部署条件，不能为了测试放开 /tmp。
     root.chmod(0o755)
@@ -118,60 +99,18 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
             owner[field] = json.loads(read_exact(data_bytes))
         return message, read_exact(total - data_bytes)
 
-    host = {"executions": 0, "state": {}, "callbacks": [], "numeric": False, "http_body": None}
+    host = {"state": {}, "callbacks": [], "bodies": [], "answer": "最少需要 21 个"}
 
     def runtime_account():
-        return {"account_id": "smoke-account", "provider_id": "openai", "credential_revision": 1 + host["executions"],
+        return {"account_id": "smoke-account", "provider_id": "openai", "credential_revision": 1,
                 "name": "Offline fixture", "email": "  smoke@example.com  ", "upstream_user_id": "fixture-user", "upstream_account_id": "fixture-workspace",
                 "plan_type": "pro", "authentication_kind": "oauth", "enabled": True, "credential_state": "ready",
                 "has_refresh_token": True, "access_token_expires_at_ms": None, "next_refresh_at_ms": None}
 
     def callback(method, params, payload):
         host["callbacks"].append(method)
-        if method == "host.http.do_stream":
-            assert updates and params["method"] == "GET" and not payload
-            assert host["http_body"] is None
-            url = params["url"]
-            pattern = r"https://api\.github\.com/repos/(chen-006/meow-llm-detector|xqy2006/ModelTrace)/(commits\?per_page=1|compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}\?per_page=1&page=2)"
-            assert re.fullmatch(pattern, url), url
-            headers = dict(params["headers"])
-            assert set(headers) == {"User-Agent", "Accept", "X-GitHub-Api-Version"}
-            assert headers["User-Agent"] == f'codex-model-health/{manifest["version"]}'
-            status = 200
-            if updates_live:
-                class NoRedirect(urllib.request.HTTPRedirectHandler):
-                    def redirect_request(self, *args):
-                        return None
-                opener = urllib.request.build_opener(NoRedirect)
-                try:
-                    with opener.open(urllib.request.Request(url, headers=headers), timeout=10) as response:
-                        status = response.status
-                        body = response.read(262145)
-                except urllib.error.HTTPError as error:
-                    status, body = error.code, b""
-                    error.close()
-            else:
-                if "/compare/" in url:
-                    data = {"status": "ahead", "ahead_by": 2, "behind_by": 0}
-                else:
-                    source = next(s for s in boot["sources"] if s["url"].removeprefix("https://github.com/") in url)
-                    data = [{"sha": source["bundled_commit"] if source["method"] == "meow" else "a" * 40}]
-                body = json.dumps(data).encode()
-            host["http_body"] = body
-            return {"status": status, "headers": [], "stream": "github"}, b""
-        if method == "host.http.stream_read":
-            assert params["stream"] == "github" and not payload
-            body = host["http_body"]
-            if not body:
-                host["http_body"] = None
-                return {"eof": True}, b""
-            length = min(len(body), params["maximum_bytes"])
-            host["http_body"] = body[length:]
-            return {"eof": False}, body[:length]
-        if method == "host.http.stream_close":
-            assert params["stream"] == "github" and not payload
-            host["http_body"] = None
-            return {}, b""
+        if method.startswith("host.state."):
+            assert params["namespace"] == "candy", "legacy runs namespace is never touched"
         if method == "host.auth.list":
             assert json.loads(payload)["provider_id"] == "openai"
             return {}, json.dumps({"accounts": [runtime_account()], "next_cursor": None}).encode()
@@ -184,34 +123,31 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
             assert params["client_key_id"] == "smoke-key" and params["protocol"] == "openai"
             return {"models": ["gpt-6-astra"]}, b""
         if method == "host.state.get":
-            assert params["namespace"] == "runs"
             return {"record": host["state"].get(params["key"])}, b""
         if method == "host.state.put":
-            assert params["namespace"] == "runs"
             previous = host["state"].get(params["key"])
             assert params["expected_version"] == (previous["version"] if previous else None)
+            assert len(params["value"]["records"]) <= 20
             version = previous["version"] + 1 if previous else 1
             host["state"][params["key"]] = {"value": params["value"], "version": version, "schema_version": 1}
             return {"version": version}, b""
+        if method == "host.state.delete":
+            assert params["expected_version"] == host["state"][params["key"]]["version"]
+            del host["state"][params["key"]]
+            return {"deleted": True}, b""
         if method == "host.model.execute_stream":
-            assert continuous or modeltrace, "bootstrap must not execute a model"
             assert params["account_id"] == "smoke-account" and params["client_key_id"] == "smoke-key"
             assert params["provider"] == "openai" and params["protocol"] == "openai" and params["model"] == "gpt-6-astra"
-            assert any(r["value"]["inflight"] and r["value"]["attempts"][-1]["status"] == "pending" for r in host["state"].values())
+            assert host["state"]["smoke-account"]["value"]["records"][-1]["status"] == "pending", "pending is persisted before sending"
             body = json.loads(payload)
-            assert body["stream"] is True and body["store"] is False
-            if host["numeric"]:
-                assert "reasoning" not in body and "max_output_tokens" not in body and "tools" not in body
-                pending = next(r["value"] for r in host["state"].values() if r["value"]["inflight"])
-                job = next(j for j in pending["plan"]["jobs"] if j["job_id"] == pending["inflight"])
-                assert body["input"] == [{"role": "user", "content": job["prompt"]}]
-            host["executions"] += 1
-            return {"request_id": f'fixture-request-{host["executions"]}', "stream": "fixture-stream"}, b""
+            assert body["stream"] is True and body["store"] is False and "tools" not in body
+            assert "苹果味" in body["input"][0]["content"]
+            host["bodies"].append(body)
+            return {"request_id": f'fixture-request-{len(host["bodies"])}', "stream": "fixture-stream"}, b""
         if method == "host.model.stream_read":
-            answer = ','.join(str(1 + (i * 37 + 13) % 355) for i in range(332)) if host["numeric"] else "3"
             data = {"type": "response.completed", "response": {"id": "fixture-response", "status": "completed",
-                    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": answer}]}],
-                    "usage": {"input_tokens": 10, "output_tokens": 1}}}
+                    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": host["answer"]}]}],
+                    "usage": {"input_tokens": 310, "output_tokens": 40, "output_tokens_details": {"reasoning_tokens": 12}}}}
             metadata = json.dumps({"wire": {"protocol": "openai", "payload": {"kind": "json", "event": None, "data": data}}}).encode()
             event = b"GPE2" + struct.pack(">III", len(metadata), 0, 0) + metadata
             return {"events": 1, "end": True}, b"HME1" + struct.pack(">II", 1, len(event)) + event
@@ -234,6 +170,9 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
             result, response = callback(message["method"], message["params"], payload)
             send({"type": "result", "id": message["id"], "result": result}, response)
 
+    def run(effort):
+        return api("api/candy/run", {"account_id": "smoke-account", "key_id": "smoke-key", "model": "gpt-6-astra", "effort": effort})
+
     try:
         assert manifest["package"]["protocolVersion"] == PROTOCOL_VERSION, manifest["package"]
         send({"type": "hello", "handshake": {"protocol_version": PROTOCOL_VERSION, "artifact_sha256": hashlib.sha256(package.read_bytes()).hexdigest(), "plugin_id": "local.model-health", "instance_id": "smoke", "generation": 1, "incarnation": "smoke", "configuration": {}, "contributes": manifest["contributes"]}})
@@ -242,109 +181,36 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
         context = {"call_id": 1, "instance_id": "smoke", "generation": 1, "incarnation": "smoke", "stage": "management", "timeout_ms": 120000, "resource_stream": False, "resource_scope_id": "smoke", "request_id": None, "attempt_id": None, "account_id": None, "credential_revision": None}
         status, boot = api("api/bootstrap")
         assert status == 200, boot
-        catalogs = boot["catalog"].get("methods", [{"method": "meow", **boot["catalog"]}])
-        meow = next(c for c in catalogs if c["method"] == "meow")
-        assert meow["engine_version"] == "4.5.4"
-        assert sorted(t["count"] for t in meow["tiers"]) == [36, 72, 108]
-        assert len(meow["models"]) == 4
-        assert boot["accounts"][0]["id"] == "smoke-account" and boot["keys"][0]["id"] == "smoke-key"
-        assert boot["accounts"][0]["email"] == "  smoke@example.com  "
-        assert host["callbacks"] == ["host.auth.list", "host.keys.list"]
+        assert boot["answer"] == "21" and "五角星形" in boot["prompt"] and boot["efforts"][0] == "none"
+        assert boot["accounts"][0]["id"] == "smoke-account" and boot["accounts"][0]["records"] == []
+        assert boot["accounts"][0]["email"] == "  smoke@example.com  " and boot["keys"][0]["id"] == "smoke-key"
+        assert host["callbacks"] == ["host.auth.list", "host.keys.list", "host.state.get"]
         status, error = api("api/models", {})
         assert status == 400 and error["error"]["message"] == "请求参数格式错误", error
-        if continuous:
-            status, result = api("api/runs/start", {"account_id": "smoke-account", "key_id": "smoke-key",
-                                "request_model": "gpt-6-astra", "claimed_model": "gpt-6-astra", "tier": "low"})
-            assert status == 200, result
-            assert result["run"]["account_id"] == "smoke-account"
-            assert result["run"]["account_name"] == "smoke@example.com"
-            run_id = result["run"]["id"]
-            for completed in range(36):
-                status, result = api("api/runs/step", {"id": run_id})
-                if status != 200:
-                    print(f"CONTINUOUS FAIL: completed={completed}/36; revision_changed=YES; real_model_calls=0", flush=True)
-                    print(result["error"]["message"], file=sys.stderr)
-                    sys.exit(1)
-                assert result["run"]["attempts"][-1]["status"] == "ok", result
-                if completed == 1:
-                    for action in ("pause", "resume"):
-                        status, response = api("api/runs/control", {"id": run_id, "action": action})
-                        assert status == 200, response
-            assert result["run"]["status"] == "completed" and result["run"]["report"]["valid_samples"] == 36
-            attempts = result["run"]["attempts"]
-            assert len({a["job_id"] for a in attempts}) == 36
-            assert [a["request_id"] for a in attempts] == [f"fixture-request-{i}" for i in range(1, 37)]
-            assert host["executions"] == 36 and runtime_account()["credential_revision"] == 37
-            status, restored = api("api/runs/get", {"id": run_id})
-            assert status == 200
-            assert_same(restored["run"], result["run"])
-            print("CONTINUOUS PASS: completed=36/36; revision=1->37; pause_resume=PASS; duplicate_requests=0; real_model_calls=0", flush=True)
-        if modeltrace:
-            if not any(c["method"] == "modeltrace" for c in catalogs):
-                print("MODELTRACE ABSENT: methods=meow; real_model_calls=0", flush=True)
-                sys.exit(1)
-            trace = next(c for c in catalogs if c["method"] == "modeltrace")
-            assert len(trace["models"]) == 17 and trace["family_count"] == 2
-            status, result = api("api/runs/start", {"method": "modeltrace", "account_id": "smoke-account", "key_id": "smoke-key",
-                                "request_model": "gpt-6-astra", "claimed_model": "unified", "tier": "fixed"})
-            assert status == 200, result
-            assert result["run"]["account_id"] == "smoke-account"
-            assert result["run"]["account_name"] == "smoke@example.com"
-            run_id = result["run"]["id"]
-            plan = result["run"]["plan"]
-            host["numeric"] = True
-            before = host["executions"]
-            for completed in range(3):
-                status, result = api("api/runs/step", {"id": run_id})
-                assert status == 200, result
-                assert result["run"]["plan"] == plan
-                assert result["run"]["report"]["valid_samples"] == completed + 1
-                if completed == 0:
-                    for action in ("pause", "resume"):
-                        status, response = api("api/runs/control", {"id": run_id, "action": action})
-                        assert status == 200, response
-            assert result["run"]["status"] == "completed" and result["run"]["report"]["verdict"] == "attributed"
-            assert len(result["run"]["report"]["analysis"]["results"]) == 17
-            assert len({a["job_id"] for a in result["run"]["attempts"]}) == 3
-            assert host["executions"] == before + 3
-            status, restored = api("api/runs/get", {"id": run_id})
-            assert status == 200
-            assert_same(restored["run"], result["run"])
-            status, history = api("api/runs")
-            assert status == 200 and history["runs"][0]["method"] == "modeltrace"
-            assert history["runs"][0]["report"] == result["run"]["report"]
-            print("MODELTRACE PASS: completed=3/3; candidates=17; pinned_account_key=PASS; frozen_plan=PASS; pause_resume=PASS; history=PASS; real_model_calls=0", flush=True)
-        if updates:
-            if "sources" not in boot:
-                print("UPDATES ABSENT: sources=0; model_methods=2; real_model_calls=0", flush=True)
-                sys.exit(1)
-            assert [s["method"] for s in boot["sources"]] == ["meow", "modeltrace"]
-            before_calls = len(host["callbacks"])
-            before_state = json.dumps(host["state"], sort_keys=True)
-            before_executions = host["executions"]
-            for source in boot["sources"]:
-                assert len(source["bundled_commit"]) == 40
-                status, result = api("api/upstreams/check", {"method": source["method"]})
-                assert status == 200, result
-                check = result["check"]
-                assert check["method"] == source["method"]
-                assert check["status"] in ["identical", "ahead", "behind", "diverged"]
-                if not updates_live:
-                    assert check["status"] == ("identical" if source["method"] == "meow" else "ahead")
-                count = len(host["callbacks"])
-                status, cached = api("api/upstreams/check", {"method": source["method"]})
-                assert status == 200 and cached == result and len(host["callbacks"]) == count
-                assert host["http_body"] is None
-                if updates_live:
-                    print(f'LIVE_GITHUB {source["label"]}: {check["status"]}; bundled={source["bundled_commit"]}; latest={check["latest_commit"]}', flush=True)
-            assert json.dumps(host["state"], sort_keys=True) == before_state
-            assert host["executions"] == before_executions
-            assert all(m.startswith("host.http.") for m in host["callbacks"][before_calls:])
-            print("UPDATES PASS: sources=2; per_source_cache=PASS; account_key_calls=0; state_changes=0; real_model_calls=0", flush=True)
+        status, models = api("api/models", {"key_id": "smoke-key"})
+        assert status == 200 and models["models"] == ["gpt-6-astra"]
+
+        status, correct = run("low")
+        assert status == 200 and correct["record"]["status"] == "correct", correct
+        assert host["bodies"][-1]["reasoning"] == {"effort": "low"}
+        assert correct["record"]["reasoning_tokens"] == 12 and "answer" not in correct["record"]
+        host["answer"] = "答案是 121 个"
+        status, wrong = run("none")
+        assert status == 200 and wrong["record"]["status"] == "wrong", wrong
+        assert "reasoning" not in host["bodies"][-1]
+        assert [r["status"] for r in wrong["records"]] == ["correct", "wrong"]
+        status, detail = api("api/candy/record", {"account_id": "smoke-account", "record_id": wrong["record"]["id"]})
+        assert status == 200 and detail["record"]["answer"] == "答案是 121 个" and detail["record"]["request_id"] == "fixture-request-2"
+        status, boot = api("api/bootstrap")
+        assert status == 200 and boot["accounts"][0]["records"] == wrong["records"]
+        status, cleared = api("api/candy/clear", {"account_ids": ["smoke-account"]})
+        assert status == 200 and cleared == {"cleared": 1, "skipped": []} and host["state"] == {}
+        print("CANDY PASS: correct=PASS; wrong=PASS; effort_none=PASS; pending_before_send=PASS; detail=PASS; clear=PASS; pinned_account_key=PASS; legacy_runs_untouched=PASS; real_model_calls=0", flush=True)
+
         send({"type": "shutdown"})
         process.wait(timeout=15)
         assert process.returncode == 0, process.stderr.read().decode()
-        print(f"PACKAGE PASS: hashes=PASS; tmp_noexec=PASS; nonroot=PASS; empty_env=PASS; readonly_root=PASS; protocol={PROTOCOL_VERSION}; engine=4.5.4; accounts=1; keys=1; error_http=400; real_model_calls=0")
+        print(f"PACKAGE PASS: hashes=PASS; tmp_noexec=PASS; nonroot=PASS; empty_env=PASS; readonly_root=PASS; protocol={PROTOCOL_VERSION}; version={manifest['version']}; accounts=1; keys=1; error_http=400; real_model_calls=0")
     finally:
         if process.poll() is None:
             subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)

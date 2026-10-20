@@ -14,23 +14,21 @@ triple() {
 }
 for ARCH in "${ARCHES[@]}"; do triple "$ARCH" >/dev/null; done
 pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend test
 pnpm --dir frontend build
 VERSION="$(node -p "require('./plugin.json').version")"
 mkdir -p .build/cargo
 for ARCH in "${ARCHES[@]}"; do
   TRIPLE="$(triple "$ARCH")"
-  # 引擎与 Rust 产物按架构分目录，避免交替构建时互相覆盖缓存。
-  ENGINE=".build/engine-$ARCH"
+  # Rust 产物按架构分目录，避免交替构建时互相覆盖缓存。
   TARGET_DIR=".build/linux-target-$ARCH"
-  docker buildx build --platform "linux/$ARCH" -f engine/Dockerfile --output "type=local,dest=$ENGINE" .
   docker run --rm --platform "linux/$ARCH" \
     -v "$ROOT:/work" -v "${LINUX_CARGO_CACHE:-$ROOT/.build/cargo}:/cache" \
-    -e CARGO_HOME=/cache -e MEOW_ENGINE_BINARY="/work/$ENGINE/meow-engine" \
-    -e CARGO_TARGET_DIR="/work/$TARGET_DIR" -w /work rust:1.99.1-slim-bookworm \
-    sh -c 'cargo test --locked --features bundled-engine --manifest-path backend/Cargo.toml && cargo build --locked --release --features bundled-engine --manifest-path backend/Cargo.toml'
+    -e CARGO_HOME=/cache -e CARGO_TARGET_DIR="/work/$TARGET_DIR" -w /work rust:1.99.1-slim-bookworm \
+    sh -c 'cargo test --locked --manifest-path backend/Cargo.toml && cargo build --locked --release --manifest-path backend/Cargo.toml'
   "${CPR_PLUGIN_BIN:-cpr-plugin}" package --manifest "$ROOT/plugin.json" \
     --binary "$ROOT/$TARGET_DIR/release/codex-model-health-plugin" \
     --target "$TRIPLE" --resource-map web=frontend/dist \
-    --resource-map legal=. --resource-map engine-legal="$ENGINE" --output-dir "$ROOT/dist"
-  python3 scripts/package-smoke.py "$ROOT/dist/local.model-health-$VERSION-$TRIPLE.tar.gz" --continuous --modeltrace --updates
+    --resource-map legal=. --output-dir "$ROOT/dist"
+  python3 scripts/package-smoke.py "$ROOT/dist/local.model-health-$VERSION-$TRIPLE.tar.gz"
 done

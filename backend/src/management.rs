@@ -1,7 +1,7 @@
 use crate::{
-    Service,
-    domain::{Method, Run, SLOTS, Status, slot_from_id},
-    host, invalid, now_ms, now_nanos, updates,
+    MAXIMUM_PARALLEL, Service,
+    candy::{self, EFFORTS, HISTORY_LIMIT, History, Record},
+    host, invalid, now_ms, now_nanos,
 };
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
@@ -10,18 +10,21 @@ use gateway_plugin_sdk::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::{collections::BTreeSet, time::Duration};
+
+/// 宿主单次管理调用上限为 120 秒，模型请求须在其中完成并留出写回记录的时间
+const REQUEST_LIMIT: Duration = Duration::from_secs(100);
+/// 管理接口响应上限 1 MiB；账号很多时减少列表中每个账号的历史条数
+const RESPONSE_BUDGET: usize = 960 * 1024;
 
 pub fn registration() -> ManagementRegistration {
     ManagementRegistration {
         routes: [
             ("GET", "api/bootstrap"),
-            ("POST", "api/upstreams/check"),
             ("POST", "api/models"),
-            ("GET", "api/runs"),
-            ("POST", "api/runs/get"),
-            ("POST", "api/runs/start"),
-            ("POST", "api/runs/step"),
-            ("POST", "api/runs/control"),
+            ("POST", "api/candy/run"),
+            ("POST", "api/candy/record"),
+            ("POST", "api/candy/clear"),
         ]
         .into_iter()
         .map(|(method, path)| ManagementRoute {
@@ -44,8 +47,8 @@ pub fn registration() -> ManagementRegistration {
             .collect(),
         pages: vec![ManagementPage {
             id: "model-health".into(),
-            title: "账号模型体检".into(),
-            description: Some("选择已有账号，使用 Meow 或 ModelTrace 检测模型行为指纹".into()),
+            title: "账号降智测试".into(),
+            description: Some("用糖果题批量测试账号是否降智，按模型与推理强度统计正确率".into()),
             entry: "web/index.html".into(),
             icon: None,
         }],
@@ -55,25 +58,22 @@ pub fn registration() -> ManagementRegistration {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Start {
-    #[serde(default)]
-    method: Method,
+struct RunInput {
     account_id: String,
     key_id: String,
-    request_model: String,
-    claimed_model: String,
-    tier: String,
+    model: String,
+    effort: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Identity {
-    id: String,
+struct RecordInput {
+    account_id: String,
+    record_id: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Control {
-    id: String,
-    action: String,
+struct ClearInput {
+    account_ids: Vec<String>,
 }
 
 fn input<T: serde::de::DeserializeOwned>(
@@ -92,32 +92,16 @@ fn reply_status(status: u16, value: Value) -> Result<TypedReply<ManagementRespon
     })
     .with_payload(serde_json::to_vec(&value).map_err(|_| invalid("响应编码失败"))?))
 }
-async fn find(host: &HostClient, id: &str) -> Result<(Run, u64), PluginFault> {
-    let (run, version) = host::read(host, slot_from_id(id)?)
-        .await?
-        .ok_or_else(|| invalid("检测记录不存在"))?;
-    if run.id != id {
-        return Err(invalid("检测记录已超出 16 条历史保留窗口"));
+/// 账号 ID 直接作为状态键，需符合宿主的键规则
+fn account_key(id: &str) -> Result<&str, PluginFault> {
+    if id.is_empty()
+        || id.chars().count() > 256
+        || id.len() > 512
+        || id.chars().any(char::is_control)
+    {
+        return Err(invalid("账号 ID 格式错误"));
     }
-    Ok((run, version))
-}
-async fn histories(host: &HostClient) -> Result<Vec<(Run, u64)>, PluginFault> {
-    let mut runs = Vec::new();
-    for slot in 0..SLOTS {
-        if let Some(run) = host::read(host, slot).await? {
-            runs.push(run);
-        }
-    }
-    runs.sort_by_key(|(r, _)| std::cmp::Reverse(r.created_at));
-    Ok(runs)
-}
-async fn update_report(service: &Service, run: &mut Run) -> Result<(), PluginFault> {
-    run.report = service
-        .engine
-        .query(json!({"op":"score","plan":run.plan,"results":run.attempts}))
-        .await?;
-    run.updated_at = now_ms();
-    Ok(())
+    Ok(id)
 }
 
 pub async fn handle(
@@ -143,7 +127,7 @@ pub async fn handle(
                 status,
                 json!({"error": {
                     "code": error.code,
-                    "message": error.message.chars().take(512).collect::<String>(),
+                    "message": candy::excerpt(&error.message, 512),
                     "send_state": error.send_state,
                 }}),
             )
@@ -155,32 +139,11 @@ async fn dispatch(
     service: &Service,
     call: TypedCall<ManagementRequest>,
 ) -> Result<TypedReply<ManagementResponse>, PluginFault> {
-    if !call.request.query.is_empty() || call.payload.len() > 8192 {
+    if !call.request.query.is_empty() || call.payload.len() > 256 * 1024 {
         return Err(invalid("管理请求大小或查询参数不符合接口"));
     }
     match (call.request.method.as_str(), call.request.path.as_str()) {
-        ("GET", "api/bootstrap") => {
-            let catalog = service.engine.query(json!({"op":"catalog"})).await?;
-            let accounts = host::accounts(&call.host)
-                .await?
-                .into_iter()
-                .map(|a| {
-                    json!({"id":a.account_id,"name":a.name,"email":a.email,"provider":a.provider_id,"plan":a.plan_type})
-                })
-                .collect::<Vec<_>>();
-            reply(
-                json!({"catalog":catalog,"sources":updates::sources()?,"accounts":accounts,"keys":host::keys(&call.host).await?}),
-            )
-        }
-        ("POST", "api/upstreams/check") => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Check {
-                method: Method,
-            }
-            let query: Check = input(&call)?;
-            reply(json!({"check":service.updates.check(&call.host, query.method).await?}))
-        }
+        ("GET", "api/bootstrap") => reply(bootstrap(service, &call.host).await?),
         ("POST", "api/models") => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -193,20 +156,23 @@ async fn dispatch(
                     .map_err(|_| invalid("模型列表编码失败"))?,
             )
         }
-        ("GET", "api/runs") => reply(
-            json!({"runs":histories(&call.host).await?.iter().map(|(r,_)|r.summary()).collect::<Vec<_>>()}),
-        ),
-        ("POST", "api/runs/get") => {
-            let query: Identity = input(&call)?;
-            let (run, _) = find(&call.host, &query.id).await?;
-            reply(json!({"run":run,"busy":service.execution.available_permits()==0}))
+        ("POST", "api/candy/run") => run(service, &call.host, input(&call)?).await,
+        ("POST", "api/candy/record") => {
+            let query: RecordInput = input(&call)?;
+            let (mut history, _) = host::read(&call.host, account_key(&query.account_id)?)
+                .await?
+                .ok_or_else(|| invalid("记录不存在或已被清空"))?;
+            if !service.is_busy(&query.account_id) {
+                history.recover();
+            }
+            let record = history
+                .records
+                .into_iter()
+                .find(|r| r.id == query.record_id)
+                .ok_or_else(|| invalid("记录不存在或已被清空"))?;
+            reply(json!({ "record": record }))
         }
-        ("POST", "api/runs/start") => start(service, &call.host, input(&call)?).await,
-        ("POST", "api/runs/control") => control(service, &call.host, input(&call)?).await,
-        ("POST", "api/runs/step") => {
-            let query: Identity = input(&call)?;
-            step(service, &call.host, &query.id).await
-        }
+        ("POST", "api/candy/clear") => clear(service, &call.host, input(&call)?).await,
         _ => Err(PluginFault::new(
             ErrorCode::Unsupported,
             "未注册的插件管理接口",
@@ -214,204 +180,154 @@ async fn dispatch(
     }
 }
 
-async fn start(
-    service: &Service,
-    host: &HostClient,
-    query: Start,
-) -> Result<TypedReply<ManagementResponse>, PluginFault> {
-    let account = host::accounts(host)
-        .await?
-        .into_iter()
-        .find(|a| a.account_id == query.account_id)
-        .ok_or_else(|| invalid("请选择已启用的 OpenAI 账号"))?;
-    let key = host::keys(host)
-        .await?
-        .into_iter()
-        .find(|k| k.id == query.key_id)
-        .ok_or_else(|| invalid("请选择已启用的测试 Key"))?;
-    if !host::models(host, &query.key_id)
-        .await?
-        .models
-        .contains(&query.request_model)
-    {
-        return Err(invalid("当前 Key 的模型列表不包含所选模型"));
+async fn bootstrap(service: &Service, host: &HostClient) -> Result<Value, PluginFault> {
+    let accounts = host::accounts(host).await?;
+    let keys = host::keys(host).await?;
+    let mut histories = Vec::with_capacity(accounts.len());
+    for account in &accounts {
+        let mut history = host::read(host, account_key(&account.account_id)?)
+            .await?
+            .map(|(history, _)| history)
+            .unwrap_or_else(|| History::new(&account.account_id));
+        // 只影响展示：没有进行中请求的 pending 记录显示为中断，下次测试时再持久化
+        if !service.is_busy(&account.account_id) {
+            history.recover();
+        }
+        histories.push(history);
     }
-    let plan=service.engine.query(json!({"op":"prepare","method":query.method,"tier":query.tier,"claimed_model":query.claimed_model,"request_model":query.request_model})).await?;
-    let _lock = service.state.lock().await;
-    let history = histories(host).await?;
-    let slot = (0..SLOTS)
-        .find(|s| !history.iter().any(|(r, _)| r.slot == *s))
-        .or_else(|| {
-            history
-                .iter()
-                .rev()
-                .find(|(r, _)| r.finished())
-                .map(|(r, _)| r.slot)
-        })
-        .ok_or_else(|| invalid("已有 16 个未结束任务，请先结束一个任务"))?;
-    let version = history
-        .iter()
-        .find(|(r, _)| r.slot == slot)
-        .map(|(_, v)| *v);
-    let account_identity = host::account_identity(&account);
-    let mut run = Run {
-        id: format!("{slot}-{}", now_nanos()),
-        slot,
-        created_at: now_ms(),
-        updated_at: now_ms(),
-        account_id: account.account_id,
-        account_name: account_name_for_display(account.email.as_deref(), &account.name),
-        credential_revision: account.credential_revision,
-        account_identity: Some(account_identity),
-        key_id: key.id,
-        key_name: key.name,
-        plan,
-        status: Status::Ready,
-        attempts: vec![],
-        inflight: None,
-        report: Value::Null,
-    };
-    update_report(service, &mut run).await?;
-    host::write(host, &run, version).await?;
-    reply(json!({"run":run}))
+    let mut body = Value::Null;
+    for limit in [HISTORY_LIMIT, 10, 5, 1] {
+        let views = accounts
+            .iter()
+            .zip(&histories)
+            .map(|(a, history)| {
+                json!({"id":a.account_id,"name":a.name,"email":a.email,"plan":a.plan_type,
+                    "enabled":a.enabled,"credential_state":a.credential_state,
+                    "running":service.is_busy(&a.account_id),"records":history.summaries(limit)})
+            })
+            .collect::<Vec<_>>();
+        body = json!({"prompt":candy::PROMPT,"answer":candy::ANSWER,"efforts":EFFORTS,
+            "timeout_seconds":REQUEST_LIMIT.as_secs(),"history_limit":HISTORY_LIMIT,"history_shown":limit,
+            "parallel_limit":MAXIMUM_PARALLEL,"accounts":views,"keys":keys});
+        if serde_json::to_vec(&body).map_or(0, |b| b.len()) <= RESPONSE_BUDGET {
+            break;
+        }
+    }
+    Ok(body)
 }
 
-async fn control(
+async fn run(
     service: &Service,
     host: &HostClient,
-    query: Control,
+    query: RunInput,
 ) -> Result<TypedReply<ManagementResponse>, PluginFault> {
-    if !["pause", "resume", "stop"].contains(&query.action.as_str()) {
-        return Err(invalid("未知的任务控制操作"));
+    if !EFFORTS.contains(&query.effort.as_str()) {
+        return Err(invalid("未知的推理强度"));
     }
-    // 只有明确续测才修复上次中断；并发中的真实请求仍持有执行租约。
-    let _execution = if query.action == "resume" {
-        Some(
-            service
-                .execution
-                .try_acquire()
-                .map_err(|_| invalid("当前题目尚在完成，请稍后刷新"))?,
+    let model = query.model.trim();
+    if model.is_empty() || model.chars().count() > 256 {
+        return Err(invalid("请选择模型"));
+    }
+    if query.key_id.trim().is_empty() {
+        return Err(invalid("请选择计量 Key"));
+    }
+    let account_id = account_key(&query.account_id)?;
+    let _permit = service.execution.try_acquire().map_err(|_| {
+        PluginFault::new(
+            ErrorCode::Capacity,
+            format!("同时进行的测试超过 {MAXIMUM_PARALLEL} 个，请降低并发后重试"),
         )
-    } else {
-        None
-    };
+    })?;
+    let _busy = service.claim(account_id)?;
+    host::testable_account(host, account_id).await?;
+    let pending = Record::pending(now_nanos().to_string(), now_ms(), model, &query.effort);
+    {
+        let _lock = service.state.lock().await;
+        let (mut history, version) = stored(host, account_id).await?;
+        history.recover();
+        history.push(pending.clone());
+        // 发送前写入 pending；进程或页面中断后按未知结果计入，不会变成免费重试
+        host::write(host, &history, version).await?;
+    }
+    // 网络等待期间不持有状态锁，其他账号可以并行作答
+    let started = tokio::time::Instant::now();
+    let execution = host::ask(
+        host,
+        account_id,
+        &query.key_id,
+        model,
+        candy::payload(model, &query.effort),
+        REQUEST_LIMIT,
+    )
+    .await;
+    let mut record = pending.graded(execution.request_id, execution.result);
+    record.duration_ms = Some(started.elapsed().as_millis() as u64);
     let _lock = service.state.lock().await;
-    let (mut run, version) = find(host, &query.id).await?;
-    if run.finished() {
-        return Err(invalid("任务已结束，历史报告保持不变"));
-    }
-    match query.action.as_str() {
-        "pause" => run.status = Status::Paused,
-        "stop" => {
-            run.status = Status::Stopped;
-            if service.execution.available_permits() > 0 && run.inflight.is_some() {
-                run.recover()?;
-                run.status = Status::Stopped;
-            }
-        }
-        "resume" => {
-            host::validate_account(host, &mut run).await?;
-            run.recover()?;
-        }
-        _ => unreachable!(),
-    }
-    update_report(service, &mut run).await?;
-    host::write(host, &run, Some(version)).await?;
-    reply(json!({"run":run}))
+    let (mut history, version) = stored(host, account_id).await?;
+    history.finish(record.clone());
+    host::write(host, &history, version).await?;
+    reply(json!({"record":record.summary(),"records":history.summaries(HISTORY_LIMIT)}))
 }
 
-async fn step(
+async fn stored(
+    host: &HostClient,
+    account_id: &str,
+) -> Result<(History, Option<u64>), PluginFault> {
+    Ok(match host::read(host, account_id).await? {
+        Some((history, version)) => (history, Some(version)),
+        None => (History::new(account_id), None),
+    })
+}
+
+async fn clear(
     service: &Service,
     host: &HostClient,
-    id: &str,
+    query: ClearInput,
 ) -> Result<TypedReply<ManagementResponse>, PluginFault> {
-    let _execution = service
-        .execution
-        .try_acquire()
-        .map_err(|_| invalid("另一个检测请求正在执行，请等待该题完成"))?;
-    let (snapshot, job, body) = {
-        let _lock = service.state.lock().await;
-        let (mut run, version) = find(host, id).await?;
-        host::validate_account(host, &mut run).await?;
-        let job = run.next_job().ok_or_else(|| invalid("检测计划已完成"))?;
-        let body = service
-            .engine
-            .query(json!({"op":"payload","plan":run.plan,"job_id":job}))
-            .await?;
-        run.reserve(&job)?;
-        run.updated_at = now_ms();
-        // 发送前写入 pending；进程或页面中断不会恢复成免费重试。
-        host::write(host, &run, Some(version)).await?;
-        (run, job, body)
-    };
-    let result = match host::execute(host, &snapshot, body).await {
-        Ok((request_id, sse)) => match service
-            .engine
-            .query(json!({"op":"evaluate","plan":snapshot.plan,"job_id":job,"sse":sse}))
-            .await
-        {
-            Ok(mut sample) => {
-                sample["request_id"] = json!(request_id);
-                sample
-            }
-            Err(error) => {
-                json!({"status":"error","error":excerpt(&error.message),"request_id":request_id})
-            }
-        },
-        Err(error) => {
-            json!({"status":"error","error":excerpt(&error.fault.message),"request_id":error.request_id})
-        }
-    };
-    let _lock = service.state.lock().await;
-    let (mut latest, version) = find(host, id).await?;
-    latest.finish_attempt(result)?;
-    update_report(service, &mut latest).await?;
-    host::write(host, &latest, Some(version)).await?;
-    reply(json!({"run":latest}))
-}
-
-fn excerpt(message: &str) -> String {
-    let mut end = message.len().min(512);
-    while !message.is_char_boundary(end) {
-        end -= 1;
+    if query.account_ids.len() > 10_000 {
+        return Err(invalid("一次最多清空 10000 个账号的记录"));
     }
-    message[..end].to_owned()
-}
-
-fn account_name_for_display(email: Option<&str>, name: &str) -> String {
-    email
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            let trimmed_name = name.trim();
-            (!trimmed_name.is_empty()).then_some(trimmed_name)
-        })
-        .unwrap_or_default()
-        .to_owned()
+    let ids = query
+        .account_ids
+        .iter()
+        .map(|id| account_key(id))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let _lock = service.state.lock().await;
+    let (mut cleared, mut skipped) = (0, vec![]);
+    for id in ids {
+        // 正在作答的账号稍后要写回结果，不能清掉它的 pending 记录
+        if service.is_busy(id) {
+            skipped.push(id);
+            continue;
+        }
+        if let Some((_, version)) = host::read(host, id).await? {
+            host::delete(host, id, version).await?;
+            cleared += 1;
+        }
+    }
+    reply(json!({"cleared":cleared,"skipped":skipped}))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::account_name_for_display;
+    use super::*;
 
     #[test]
-    fn account_name_prefers_trimmed_email() {
-        assert_eq!(
-            account_name_for_display(Some("  first@example.com  "), "OPENAI账号"),
-            "first@example.com"
-        );
+    fn account_ids_follow_host_state_key_rules() {
+        assert!(account_key("acct_1").is_ok());
+        assert!(account_key(&"账".repeat(170)).is_ok());
+        for id in [
+            String::new(),
+            "a\nb".into(),
+            "x".repeat(257),
+            "账".repeat(171),
+        ] {
+            assert!(account_key(&id).is_err());
+        }
     }
 
     #[test]
-    fn account_name_falls_back_to_trimmed_name() {
-        assert_eq!(
-            account_name_for_display(Some("   "), "  OPENAI账号  "),
-            "OPENAI账号"
-        );
-    }
-
-    #[test]
-    fn account_name_allows_empty_fallback() {
-        assert_eq!(account_name_for_display(None, "   "), "");
+    fn request_limit_leaves_room_inside_host_call_timeout() {
+        assert!(REQUEST_LIMIT + Duration::from_secs(15) <= Duration::from_secs(120));
     }
 }

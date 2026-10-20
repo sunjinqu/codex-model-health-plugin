@@ -1,18 +1,20 @@
-账号模型体检 / Codex Proxy Model Health 0.3.0
+账号降智测试 / Codex Proxy Model Health 0.4.0
 
-This plugin integrates unchanged Meow LLM Detector source from commit
-0f31d4a96c9e953277ab8e337d3dbd3ec57b316e (engine 4.5.4; baseline 4.5.3-predictive.2).
-Source: https://github.com/chen-006/meow-llm-detector
-Required Notice: Copyright 2026 chen-006 and contributors.
-Original project: https://github.com/chen-006/gpt56_api_detector
-Meow and this integrated distribution: PolyForm Noncommercial 1.0.0, see LICENSE.
-Full original notices remain in vendor/meow/THIRD_PARTY_NOTICES.md in the source archive.
+This plugin's own code is distributed under PolyForm Noncommercial 1.0.0, see LICENSE.
+
+The candy question prompt, its answer rule (a standalone "21") and the Codex plan
+names are adapted from haowang02/codex-candy-eval and
+haowang02/cpa-plugin-codex-candy-eval, MIT licensed (notice below).
+Source: https://github.com/haowang02/cpa-plugin-codex-candy-eval
 
 Host SDK: zyycn/codex-proxy-rs at af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8, Apache-2.0.
 UI: zyycn/codex-proxy-ui v0.3.2, Apache-2.0.
+The page bundles marked 18.0.14 (MIT) and DOMPurify 3.4.16 (Apache-2.0, dual
+licensed with MPL-2.0; used here under Apache-2.0, text in the SDK section).
 Vue, Vite, Tailwind CSS and lucide dependencies retain their original licenses.
-Bundled Python/NumPy/HTTPX/keyring/PyInstaller runtime notices and versions are
-provided in engine-legal/ENGINE-LICENSES.txt and ENGINE-REQUIREMENTS.txt.
+
+Earlier versions bundled Meow LLM Detector and ModelTrace; this version contains
+neither of them.
 
 
 === Codex Proxy SDK Apache-2.0 ===
@@ -517,16 +519,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-ModelTrace fingerprint.py and data/unified_bank.json are unchanged from
-https://github.com/xqy2006/ModelTrace at d4131b30243dfa05e70180b5eedde742103f1d73.
-Source hashes: vendor/modeltrace/SOURCE.json. ModelTrace is MIT licensed.
-The integrated distribution continues to include Meow under PolyForm Noncommercial 1.0.0.
-
-
-=== ModelTrace MIT ===
+=== codex-candy-eval / cpa-plugin-codex-candy-eval MIT ===
 MIT License
 
-Copyright (c) 2026 xqy2006
+Copyright (c) 2026 Hao Wang
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -545,3 +541,57 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+=== marked ===
+# License information
+
+## Contribution License Agreement
+
+If you contribute code to this project, you are implicitly allowing your code
+to be distributed under the MIT license. You are also implicitly verifying that
+all code is your original work. `</legalese>`
+
+## Marked
+
+Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/)
+Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+## Markdown
+
+Copyright © 2004, John Gruber
+http://daringfireball.net/
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+* Neither the name “Markdown” nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+This software is provided by the copyright holders and contributors “as is” and any express or implied warranties, including, but not limited to, the implied warranties of merchantability and fitness for a particular purpose are disclaimed. In no event shall the copyright owner or contributors be liable for any direct, indirect, incidental, special, exemplary, or consequential damages (including, but not limited to, procurement of substitute goods or services; loss of use, data, or profits; or business interruption) however caused and on any theory of liability, whether in contract, strict liability, or tort (including negligence or otherwise) arising in any way out of the use of this software, even if advised of the possibility of such damage.
+
+
+=== DOMPurify ===
+DOMPurify 3.4.16 | (c) Cure53 and other contributors
+Released under the Apache License 2.0 and Mozilla Public License 2.0;
+redistributed here under the Apache License 2.0 reproduced in the
+Codex Proxy SDK section above.

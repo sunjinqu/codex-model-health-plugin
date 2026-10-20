@@ -1,152 +1,289 @@
 <script setup lang="ts">
-import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
-import { BaseButton, BaseCard, BaseSelect, BaseSegmented, BaseTable, BaseTag, BaseIconButton } from '@codex-proxy/ui'
-import type { BaseTableColumn } from '@codex-proxy/ui'
-import { Play, Pause, Square, RefreshCw, FlaskConical, ArrowRight, Check, Fingerprint, ShieldCheck } from '@lucide/vue'
+import { computed, onMounted, onScopeDispose, reactive, ref, watch } from 'vue'
+import { BaseButton, BaseCard, BaseCheckbox, BaseConfirmModal, BaseIconButton, BaseInput, BaseNumberInput, BaseSelect, BaseSwitch, BaseTable, BaseTag } from '@codex-proxy/ui'
+import type { BaseTableColumn, BaseTableSort } from '@codex-proxy/ui'
+import { ArrowDownToLine, ArrowUpFromLine, Brain, Candy, ChevronRight, Clock, Copy, LoaderCircle, Play, RefreshCw, Search, Square, Trash2 } from '@lucide/vue'
 import { api } from './api'
-import type { Bootstrap, Run, History, Method } from './api'
+import type { Account, Bootstrap, ClearResult, RecordStatus, RunResult } from './api'
 import { accountDisplayName } from './accountDisplay'
-import { formatTime, methodText, statusText, tierText, verdict, tone, reasonText } from './presentation'
-import SourceUpdates from './SourceUpdates.vue'
+import { accuracy, credentialStateText, formatDuration, formatNumber, formatPercent, formatTime, inScope, modelLabel, planInfo, rateTone, statusText } from './presentation'
+import StatusMark from './components/StatusMark.vue'
+import RecordHistory from './components/RecordHistory.vue'
 
 const preview = import.meta.env.DEV && new URLSearchParams(location.search).get('preview') === '1'
-const bootstrap = ref<Bootstrap | null>(null), history = ref<History[]>([]), run = ref<Run | null>(null)
-const loading = ref(true), error = ref(''), action = ref(false), pumping = ref(false), modelsLoading = ref(false), starting = ref(false)
-const account = ref(''), key = ref(''), model = ref(''), claimed = ref(''), tier = ref('low'), models = ref<string[]>([])
-const method = ref<Method>('meow')
-const catalog = computed(() => bootstrap.value?.catalog.methods.find(c => c.method === method.value))
-const methodOptions = computed(() => bootstrap.value?.catalog.methods.map(c => ({value:c.method,label:c.label})) ?? [])
-watch(method, value => { tier.value = value === 'modeltrace' ? 'fixed' : 'low'; claimed.value = value === 'modeltrace' ? 'unified' : '' })
-const reportView = ref('fingerprint')
-let keepRunning = false, disposed = false, modelSequence = 0
-const tierOptions = computed(() => catalog.value?.tiers.map(t => ({value:t.id,label:`${({low:'快速',medium:'标准',high:'完整'} as Record<string,string>)[t.id]} · ${t.count} 题`})) ?? [])
-const count = computed(() => catalog.value?.tiers.find(t => t.id === tier.value)?.count ?? 0)
-const finished = computed(() => run.value?.status === 'completed' || run.value?.status === 'stopped')
-const valid = computed(() => run.value?.attempts.filter(a => a.status === 'ok').length ?? 0)
-const failures = computed(() => run.value?.attempts.filter(a => a.status === 'error').length ?? 0)
-const canStart = computed(() => account.value && key.value && model.value && claimed.value && !loading.value && !modelsLoading.value && !action.value && !pumping.value && !error.value)
-const lastError = computed(() => [...(run.value?.attempts ?? [])].reverse().find(a => a.status === 'error')?.error)
-const traceReport = computed(() => run.value?.report.method === 'modeltrace' ? run.value.report : null)
-const candidates = computed<[string, number][]>(() => {
-  const report = run.value?.report
-  return report?.method === 'modeltrace' ? (report.analysis?.results.slice(0,5).map(r => [r.display_name,r.probability] as [string,number]) ?? []) : Object.entries(report?.matches ?? {}).sort((a,b) => b[1]-a[1])
+const boot = ref<Bootstrap | null>(null), accounts = ref<Account[]>([])
+const loading = ref(true), error = ref(''), notices = ref<string[]>([]), copied = ref(''), clearNote = ref('')
+const key = ref(''), model = ref(''), effort = ref('low'), runs = ref(1), parallel = ref(3)
+const models = ref<string[]>([]), modelsLoading = ref(false)
+const onlyEnabled = ref(true), planFilter = ref(''), search = ref(''), sort = ref<BaseTableSort>()
+const selected = ref(new Set<string>()), expanded = ref(new Set<string>()), focus = ref<Record<string, {id: string; seq: number}>>({})
+const progress = reactive(new Map<string, {done: number; total: number; started: boolean}>())
+const batch = reactive({running: false, stopping: false, total: 0, done: 0, correct: 0, wrong: 0, failed: 0, skipped: 0})
+const confirmClear = ref(false), clearing = ref(false)
+let disposed = false, modelSequence = 0, focusSequence = 0
+
+type Row = Account & {display: string; plan_label: string; plan_tone: 'warning' | 'primary' | 'info' | 'neutral'; plan_rank: number; stats: ReturnType<typeof accuracy>; last?: Account['records'][number]}
+const columns: BaseTableColumn<Row>[] = [
+  {key: 'select', kind: 'selection', label: '选择'},
+  {key: 'account', label: '账号', kind: 'custom', size: '3xl', sortable: true},
+  {key: 'latest', label: '最近一次', kind: 'custom', size: '3xl', sortable: true},
+  {key: 'rate', label: '正确率', kind: 'custom', size: 'md', sortable: true},
+  {key: 'marks', label: '最近记录', kind: 'custom', size: '2xl'},
+  {key: 'actions', label: '操作', kind: 'actions'},
+]
+
+const busy = computed(() => batch.running || loading.value)
+const keyOptions = computed(() => boot.value?.keys.map(k => ({value: k.id, label: k.name})) ?? [])
+const modelOptions = computed(() => models.value.map(m => ({value: m, label: m})))
+const effortOptions = computed(() => boot.value?.efforts.map(e => ({value: e, label: e === 'none' ? '默认（由主服务决定）' : e})) ?? [])
+const planOptions = computed(() => {
+  const plans = new Map<string, number>()
+  for (const a of accounts.value) { const p = planInfo(a.plan); plans.set(p.label, p.rank) }
+  return [{value: '', label: '全部订阅类型'}, ...[...plans].sort((a, b) => a[1] - b[1]).map(([label]) => ({value: label, label}))]
 })
-const historyColumns: BaseTableColumn<History>[] = [{key:'created_at',label:'检测时间',kind:'datetime',format:value=>formatTime(Number(value))},{key:'account_name',label:'账号',kind:'identity',size:'xl'},{key:'method',label:'检测方法',size:'lg',format:value=>methodText(value as Method | undefined)},{key:'request_model',label:'请求模型',kind:'mono',size:'lg'},{key:'tier',label:'检测档位',size:'lg',format:value=>tierText[String(value)]},{key:'result',label:'检测结果',kind:'custom',size:'xl'},{key:'actions',label:'操作',kind:'actions'}]
-const attemptColumns = [{key:'number',label:'#',kind:'index'},{key:'job_id',label:'样本',kind:'mono',size:'xl'},{key:'status',label:'状态',kind:'status'},{key:'answer',label:'回答 / 错误',kind:'custom',size:'2xl'},{key:'request_id',label:'请求 ID',kind:'mono',size:'2xl'}] satisfies BaseTableColumn[]
-const accountOptions = computed(() => bootstrap.value?.accounts.map(a => ({value:a.id,label:accountDisplayName(a)})) ?? [])
+const rows = computed<Row[]>(() => {
+  const query = search.value.trim().toLowerCase()
+  const list = accounts.value
+    .filter(a => (!onlyEnabled.value || a.enabled) && (!planFilter.value || planInfo(a.plan).label === planFilter.value) && (!query || `${a.email ?? ''} ${a.name} ${a.id}`.toLowerCase().includes(query)))
+    .map(a => { const plan = planInfo(a.plan); return {...a, display: accountDisplayName(a) || a.id, plan_label: plan.label, plan_tone: plan.tone, plan_rank: plan.rank, stats: accuracy(a.records, model.value, effort.value), last: a.records.at(-1)} })
+  const direction = sort.value?.direction === 'desc' ? -1 : 1
+  const by: Record<string, (a: Row, b: Row) => number> = {
+    account: (a, b) => a.display.localeCompare(b.display),
+    latest: (a, b) => (a.last?.time ?? 0) - (b.last?.time ?? 0),
+    rate: (a, b) => (a.stats.rate ?? -1) - (b.stats.rate ?? -1) || a.stats.graded - b.stats.graded,
+  }
+  const compare = sort.value ? by[sort.value.key] : undefined
+  return list.sort((a, b) => compare ? compare(a, b) * direction : Number(b.enabled) - Number(a.enabled) || a.plan_rank - b.plan_rank || a.display.localeCompare(b.display))
+})
+const visibleTestable = computed(() => rows.value.filter(r => r.enabled))
+const targets = computed(() => selected.value.size ? accounts.value.filter(a => selected.value.has(a.id) && a.enabled) : visibleTestable.value)
+const allChecked = computed(() => visibleTestable.value.length > 0 && visibleTestable.value.every(r => selected.value.has(r.id)))
+const someChecked = computed(() => !allChecked.value && visibleTestable.value.some(r => selected.value.has(r.id)))
+const scopeLabel = computed(() => model.value ? modelLabel(model.value, effort.value) : '—')
+const overall = computed(() => accuracy(accounts.value.flatMap(a => a.records), model.value, effort.value))
+const canRun = computed(() => !!(key.value && model.value && !modelsLoading.value && !busy.value))
+const clearScope = computed(() => selected.value.size ? `所选 ${selected.value.size} 个账号` : `全部 ${accounts.value.length} 个账号`)
 
 function message(cause: unknown) { return cause instanceof Error ? cause.message : String(cause) }
-async function loadHistory() { history.value = (await api<{runs: History[]}>('runs')).runs }
+
 async function load() {
   loading.value = true; error.value = ''
-  try { bootstrap.value = await api<Bootstrap>('bootstrap'); await loadHistory(); if (key.value) await loadModels(key.value) }
-  catch (cause) { error.value = message(cause) }
+  try {
+    const data = await api<Bootstrap>('bootstrap')
+    boot.value = data; accounts.value = data.accounts
+    const ids = new Set(data.accounts.map(a => a.id))
+    selected.value = new Set([...selected.value].filter(id => ids.has(id)))
+    // 沙箱页面无法使用浏览器存储；首次打开时沿用最近一次测试的模型与推理强度
+    const latest = data.accounts.flatMap(a => a.records).sort((a, b) => b.time - a.time)[0]
+    if (!model.value && latest) { model.value = latest.model; effort.value = latest.effort }
+    if (!data.efforts.includes(effort.value)) effort.value = data.efforts.includes('low') ? 'low' : data.efforts[0] ?? 'none'
+    parallel.value = Math.min(parallel.value, data.parallel_limit)
+    const chosen = data.keys.some(k => k.id === key.value) ? key.value : data.keys[0]?.id ?? ''
+    if (chosen === key.value) await loadModels(chosen)
+    else key.value = chosen
+  } catch (cause) { error.value = message(cause) }
   finally { loading.value = false }
 }
 async function loadModels(value: string) {
   const sequence = ++modelSequence
-  model.value = ''; models.value = []; error.value = ''
-  if (!value) return
+  models.value = []
+  if (!value) { model.value = ''; return }
   modelsLoading.value = true
-  try { const result = await api<{models: string[]}>('models', {key_id:value}); if (sequence === modelSequence) models.value = result.models }
-  catch (cause) { if (sequence === modelSequence) error.value = message(cause) }
+  try {
+    const result = await api<{models: string[]}>('models', {key_id: value})
+    if (sequence !== modelSequence) return
+    models.value = result.models
+    if (!result.models.includes(model.value)) model.value = result.models[0] ?? ''
+  } catch (cause) { if (sequence === modelSequence) error.value = message(cause) }
   finally { if (sequence === modelSequence) modelsLoading.value = false }
 }
 watch(key, value => { void loadModels(value) })
-async function operate(fn: () => Promise<void>) {
-  if (action.value) return
-  action.value = true; error.value = ''
-  try { await fn() } catch (cause) { error.value = message(cause); keepRunning = false }
-  finally { action.value = false }
+
+function toggleSelect(id: string, value: boolean) { const next = new Set(selected.value); if (value) next.add(id); else next.delete(id); selected.value = next }
+function toggleAll(value: boolean) { const next = new Set(selected.value); for (const r of visibleTestable.value) { if (value) next.add(r.id); else next.delete(r.id) } selected.value = next }
+function toggleExpand(id: string) { const next = new Set(expanded.value); if (next.has(id)) next.delete(id); else next.add(id); expanded.value = next }
+function openRecord(accountId: string, recordId: string) {
+  focus.value = {...focus.value, [accountId]: {id: recordId, seq: ++focusSequence}}
+  if (!expanded.value.has(accountId)) toggleExpand(accountId)
 }
-async function pump() {
-  if (pumping.value || !run.value) return
-  const id = run.value.id
-  keepRunning = true; pumping.value = true
-  try {
-    while (keepRunning && !disposed && document.visibilityState === 'visible' && run.value?.id === id && run.value.status === 'ready') {
-      run.value = (await api<{run: Run}>('runs/step', {id})).run
+function setRecords(id: string, records: Account['records']) { const account = accounts.value.find(a => a.id === id); if (account) account.records = records }
+function tally(status: RecordStatus) { if (status === 'correct') batch.correct++; else if (status === 'wrong') batch.wrong++; else batch.failed++ }
+
+/** 每个账号串行作答，最多 parallel 个账号同时进行；页面关闭或点停止后不再发出新请求 */
+async function runAccounts(list: Account[]) {
+  if (batch.running || !canRun.value || !list.length) return
+  const params = {key_id: key.value, model: model.value, effort: effort.value}
+  const perAccount = Math.min(Math.max(Math.round(runs.value) || 1, 1), 10), workers = Math.min(Math.max(Math.round(parallel.value) || 1, 1), boot.value?.parallel_limit ?? 8)
+  Object.assign(batch, {running: true, stopping: false, total: list.length * perAccount, done: 0, correct: 0, wrong: 0, failed: 0, skipped: 0})
+  notices.value = []; clearNote.value = ''
+  for (const a of list) progress.set(a.id, {done: 0, total: perAccount, started: false})
+  const queue = [...list]
+  const worker = async () => {
+    while (queue.length && !batch.stopping && !disposed) {
+      const account = queue.shift()!, state = progress.get(account.id)!
+      state.started = true
+      for (let i = 0; i < perAccount; i++) {
+        if (batch.stopping || disposed) { batch.skipped += perAccount - i; batch.done += perAccount - i; break }
+        try {
+          const result = await api<RunResult>('candy/run', {account_id: account.id, ...params})
+          setRecords(account.id, result.records); tally(result.record.status)
+        } catch (cause) {
+          // 未发出或未落盘的请求不算答题；该账号剩余次数跳过，其他账号继续
+          notices.value = [...notices.value, `${accountDisplayName(account) || account.id}：${message(cause)}`]
+          batch.skipped += perAccount - i; batch.done += perAccount - i
+          break
+        }
+        state.done++; batch.done++
+      }
+      progress.delete(account.id)
     }
-    if (!disposed) await loadHistory()
-  } catch (cause) { error.value = `${message(cause)}；请刷新任务状态后再续测，避免重复请求` }
-  finally { pumping.value = false; keepRunning = false }
+  }
+  await Promise.all(Array.from({length: Math.min(workers, list.length)}, worker))
+  for (const a of queue) { progress.delete(a.id); batch.skipped += perAccount; batch.done += perAccount }
+  batch.running = false; batch.stopping = false
 }
-async function start() {
-  starting.value = true
-  await operate(async () => {
-    run.value = (await api<{run: Run}>('runs/start', {method:method.value,account_id:account.value,key_id:key.value,request_model:model.value,claimed_model:claimed.value,tier:tier.value})).run
-    reportView.value = 'fingerprint'
-    await loadHistory()
-  })
-  starting.value = false
-  if (!error.value) void pump()
+function runOne(id: string) { const account = accounts.value.find(a => a.id === id); if (account) void runAccounts([account]) }
+
+async function clearRecords() {
+  clearing.value = true
+  const ids = selected.value.size ? [...selected.value] : accounts.value.map(a => a.id)
+  try {
+    const result = await api<ClearResult>('candy/clear', {account_ids: ids})
+    const skipped = new Set(result.skipped)
+    for (const id of ids) if (!skipped.has(id)) setRecords(id, [])
+    clearNote.value = `已清空 ${ids.length - skipped.size} 个账号的记录${skipped.size ? `，${skipped.size} 个正在测试的账号已跳过` : ''}`
+    confirmClear.value = false
+  } catch (cause) { error.value = message(cause); confirmClear.value = false }
+  finally { clearing.value = false }
 }
-async function control(command: string) {
-  if (!run.value) return
-  keepRunning = false
-  await operate(async () => { run.value = (await api<{run: Run}>('runs/control', {id:run.value!.id,action:command})).run; await loadHistory() })
-  if (command === 'resume' && !error.value) void pump()
+function copyPrompt() {
+  const area = document.getElementById('candy-prompt') as HTMLTextAreaElement
+  area.focus(); area.select()
+  // 宿主 iframe 不开放异步剪贴板；复制失败时保留选区供手动复制
+  try { copied.value = document.execCommand('copy') ? '已复制' : '题目已选中，请手动复制' } catch { copied.value = '题目已选中，请手动复制' }
 }
-async function openRun(id: string) { await operate(async () => { run.value = (await api<{run: Run}>('runs/get',{id})).run }) }
-function visibility() { if (document.visibilityState !== 'visible') keepRunning = false }
-onMounted(() => { void load(); document.addEventListener('visibilitychange',visibility) })
-onScopeDispose(() => { disposed=true;keepRunning=false;document.removeEventListener('visibilitychange',visibility) })
+
+onMounted(() => { void load() })
+onScopeDispose(() => { disposed = true })
 </script>
 
 <template>
-  <main class="flex min-w-0 flex-col gap-5 font-sans text-cp-text">
-    <div v-if="preview" class="preview-note" role="note">独立模拟预览 · 不代表真实账号的检测结果</div>
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <p class="m-0 text-cp-sm text-cp-text-secondary">固定账号 · 原生代理链路 · 双方法行为指纹</p>
-      <BaseIconButton label="刷新账号和历史" :disabled="loading || pumping" @click="load"><RefreshCw class="size-4" /></BaseIconButton>
-    </div>
-    <div v-if="error" class="error-panel" role="alert"><strong>操作未完成</strong><p>{{ error }}</p><BaseButton size="sm" @click="error=''; run ? openRun(run.id) : load()">重新读取状态</BaseButton></div>
-    <div class="setup-grid">
-      <BaseCard>
-        <template #header><div class="flex items-center gap-3"><span class="section-icon"><FlaskConical class="size-5" /></span><div><h2>新建检测</h2><p class="subtitle">使用已有账号，无需填写 API 地址或密钥</p></div></div></template>
-        <template #body>
-          <p v-if="loading" role="status" class="muted">正在读取宿主账号与检测基线…</p>
-          <p v-else-if="bootstrap && (!bootstrap.accounts.length || !bootstrap.keys.length)" role="status" class="muted">请先在主项目启用 OpenAI 账号和测试 Key，然后刷新。</p>
-          <div class="form-grid">
-            <div class="field col-span-full"><label id="method-label">检测方法</label><BaseSegmented v-model="method" aria-labelledby="method-label" label="检测方法" :options="methodOptions" :disabled="loading || pumping || action" /></div>
-            <div class="field"><label id="account-label">检测账号</label><BaseSelect v-model="account" aria-labelledby="account-label" :options="accountOptions" :disabled="loading || pumping" placeholder="选择已有账号" searchable /></div>
-            <div class="field"><label id="key-label">计量 Key</label><BaseSelect v-model="key" aria-labelledby="key-label" :options="bootstrap?.keys.map(k=>({value:k.id,label:k.name})) ?? []" :disabled="loading || pumping" placeholder="选择用于计量的 Key" searchable /></div>
-            <div class="field"><label id="model-label">请求模型</label><BaseSelect v-model="model" aria-labelledby="model-label" :options="models.map(m=>({value:m,label:m}))" :loading="modelsLoading" :disabled="!key || pumping" placeholder="先选择计量 Key" searchable /></div>
-            <div class="field"><label id="claimed-label">对照基线</label><BaseSelect v-if="method === 'meow'" v-model="claimed" aria-labelledby="claimed-label" :options="catalog?.models.map(m=>({value:m.id,label:m.label || m.id})) ?? []" :disabled="loading || pumping" placeholder="选择要核对的模型" /><BaseSelect v-else model-value="unified" aria-labelledby="claimed-label" :options="[{value:'unified',label:`统一候选库 · ${catalog?.models.length ?? 0} 个模型`}]" disabled /></div>
-            <div v-if="method === 'meow'" class="field col-span-full"><label id="tier-label">检测档位</label><BaseSegmented v-model="tier" aria-labelledby="tier-label" label="检测档位" :options="tierOptions" :disabled="pumping" /></div>
-            <p v-else class="col-span-full muted text-cp-sm m-0">三轮独立数字选择 · 同时比较 GPT / Claude 家族候选</p>
-          </div>
-          <div class="start-row"><p class="muted text-cp-xs">{{ count }} 个样本 · 最多 {{ count + Math.ceil(count/2) }} 次请求（含重试）<br>真实调用会计入所选 Key 的用量；每次仅检测一个请求。</p><BaseButton variant="primary" :disabled="!canStart" :loading="starting" @click="start"><Play class="size-4" />开始检测</BaseButton></div>
-        </template>
-      </BaseCard>
-      <BaseCard>
-        <template #header><div class="flex items-center gap-2"><Fingerprint class="size-5 text-cp-text-secondary" /><h2>如何理解结果</h2></div></template>
-        <template #body>
-          <div class="explanation"><p>这里比较的是<span class="text-cp-text font-emphasis">模型行为指纹</span>，不是智商分数，也不是模型身份认证</p><ul><li><Check class="size-4" /><span>锁定所选账号，由主服务使用其原有代理和凭据发送</span></li><li><Check class="size-4" /><span>错误、拒答和截断不算模型答错，失败后自动暂停</span></li><li><Check class="size-4" /><span>切走页面后不再发下一题，重新打开可手动续测</span></li></ul><div class="baseline-meta"><span>检测引擎</span><strong>{{ methodText(method) }} {{ catalog?.engine_version ?? '—' }}</strong><span>基线版本</span><strong>{{ catalog?.version ?? '—' }}</strong></div><p v-if="method === 'modeltrace'" class="text-cp-xs mb-0">概率只在候选库内比较，库外模型也会归到最接近的候选，不代表真实身份概率</p><p v-else class="text-cp-xs mb-0">Meow 使用 GPT 行为基线，检测不会自动调整账号、路由或额度</p></div>
-          <SourceUpdates v-if="bootstrap" :sources="bootstrap.sources" />
-        </template>
-      </BaseCard>
-    </div>
+  <main class="flex min-w-0 flex-col gap-4 font-sans text-cp-text">
+    <div v-if="preview" class="preview-note" role="note">独立模拟预览 · 不代表真实账号的测试结果</div>
 
-    <BaseCard v-if="run">
-      <template #header><div class="flex flex-wrap items-center justify-between gap-3"><div><div class="flex flex-wrap items-center gap-2"><h2>{{ run.account_name }}</h2><BaseTag :type="tone(run.report,run.status)">{{ statusText[run.status] }}</BaseTag><BaseTag>{{ methodText(run.plan.method) }}</BaseTag></div><p class="subtitle">{{ run.plan.request_model }} <span class="mx-1">→</span> {{ run.plan.method === 'modeltrace' ? '统一候选库' : run.plan.claimed_model }} · {{ tierText[run.plan.tier] }}</p></div><div class="flex flex-wrap gap-2"><BaseIconButton label="刷新当前任务" :disabled="action || pumping" @click="openRun(run.id)"><RefreshCw class="size-4" /></BaseIconButton><template v-if="!finished"><BaseButton v-if="pumping" size="sm" :disabled="action" @click="control('pause')"><Pause class="size-4" />当前题完成后暂停</BaseButton><BaseButton v-else size="sm" variant="primary" :disabled="action" @click="control('resume')"><Play class="size-4" />继续检测</BaseButton><BaseButton size="sm" :disabled="action" @click="control('stop')"><Square class="size-3" />结束检测</BaseButton></template></div></div></template>
+    <section class="intro">
+      <div class="intro-text">
+        <h1><Candy class="size-5" />账号降智测试</h1>
+        <p>让模型解一道糖果题，答出 <b class="font-mono">{{ boot?.answer ?? '21' }}</b> 即为正确。同一模型与推理强度下多次作答，正确率明显偏低的账号可能被降智。</p>
+        <details class="problem">
+          <summary><ChevronRight class="size-4 chev" />查看题目</summary>
+          <div class="problem-body">
+            <textarea id="candy-prompt" :value="boot?.prompt ?? ''" readonly spellcheck="false" aria-label="糖果题题目" />
+            <div class="problem-actions"><BaseButton size="sm" variant="ghost" @click="copyPrompt"><template #icon><Copy class="size-3.5" /></template>复制题目</BaseButton><span v-if="copied" role="status" class="muted text-cp-xs">{{ copied }}</span></div>
+          </div>
+        </details>
+      </div>
+      <BaseIconButton label="刷新账号和记录" :disabled="busy" @click="load"><RefreshCw class="size-4" /></BaseIconButton>
+    </section>
+
+    <div v-if="error" class="error-panel" role="alert"><strong>操作未完成</strong><p>{{ error }}</p><BaseButton size="sm" :disabled="busy" @click="load">重新读取</BaseButton></div>
+
+    <BaseCard>
       <template #body>
-        <div class="progress-facts"><div><span>有效样本</span><strong>{{ valid }} <small>/ {{ run.plan.jobs.length }}</small></strong></div><div><span>尝试（含中断）</span><strong>{{ run.attempts.length }} <small>/ {{ run.plan.jobs.length + run.plan.retry_budget }}</small></strong></div><div><span>失败 / 中断</span><strong>{{ failures }}</strong></div><div><span>检测结论</span><strong class="verdict-text">{{ verdict(run.report,run.status) }}</strong></div></div>
-        <progress class="sample-progress" :value="valid" :max="run.plan.jobs.length" aria-label="有效样本进度" />
-        <p v-if="pumping" role="status" class="muted text-cp-sm">当前题目正在请求中；结束或暂停会保留本题的用量与结果。</p>
-        <p v-else-if="!finished" class="muted text-cp-sm">检测未自动运行。点击“继续检测”后，页面会逐题发送请求。</p>
-        <p v-if="lastError" class="sample-error" role="status">最近一次异常：{{ lastError }}</p>
-        <div class="flex flex-wrap justify-between items-center gap-3 mt-5 mb-4"><BaseSegmented v-model="reportView" label="报告视图" :options="[{value:'fingerprint',label:'指纹报告'},{value:'samples',label:'请求明细'}]" /><span class="muted text-cp-xs">{{ formatTime(run.updated_at) }} 更新 · {{ run.key_name }}</span></div>
-        <div v-if="reportView === 'fingerprint'" class="report-grid">
-          <div><p class="text-cp-sm font-emphasis mt-0">{{ traceReport ? '前 5 候选 · 库内相对概率' : '候选相对匹配度' }} <span class="muted font-normal">（不是正确率）</span></p><p v-if="!candidates.length" class="muted">还没有有效样本</p><div v-for="[name,value] in candidates" :key="name" class="candidate"><div class="flex justify-between gap-3 text-cp-sm"><span class="break-all">{{ name === 'other_known_external' ? '其他 / 未建模行为' : name }}</span><span class="font-mono">{{ (value*100).toFixed(1) }}%</span></div><div class="candidate-track"><div :style="{width:`${Math.max(0,Math.min(100,value*100))}%`}" /></div><p v-if="run.report.method !== 'modeltrace'" class="muted text-cp-xs mt-1 mb-0">判定阈值 {{ ((run.report.thresholds[name] ?? 0)*100).toFixed(1) }}%</p></div><div v-if="traceReport?.analysis" class="baseline-meta"><template v-for="family in traceReport.analysis.family_probabilities" :key="family.family"><span>{{ family.display_name }} 家族</span><strong>{{ (family.probability*100).toFixed(1) }}%</strong></template></div></div>
-          <div class="report-note"><ShieldCheck class="size-5 mb-3 text-cp-text-secondary" /><strong>{{ verdict(run.report,run.status) }}</strong><p v-if="run.report.reasons.length">{{ run.report.reasons.map(r=>reasonText[r] || r).join('，') }}</p><p v-if="traceReport">ModelTrace 在冻结的统一候选库内比较，库外模型也会被归到现有候选，结果不是模型身份认证</p><p v-else-if="!run.report.reasons.length">结果仅针对本次账号、请求模型与冻结的基线，建议同条件复测后再判断是否存在持续偏移</p><p>请求模型可能经过主项目的模型映射或中间件，报告反映这条实际链路的行为</p><p class="text-cp-xs mb-1">{{ methodText(run.plan.method) }} · {{ run.plan.version }} · 冻结基线 SHA-256</p><code class="baseline-hash">{{ run.plan.hash }}</code></div>
+        <form class="toolbar" @submit.prevent="batch.running ? (batch.stopping = true) : runAccounts(targets)">
+          <div class="field"><label id="key-label">计量 Key</label><BaseSelect v-model="key" aria-labelledby="key-label" :options="keyOptions" :disabled="busy" placeholder="选择用于计量的 Key" filterable /></div>
+          <div class="field field-wide"><label id="model-label">模型</label><BaseSelect v-model="model" aria-labelledby="model-label" :options="modelOptions" :loading="modelsLoading" :disabled="!key || batch.running" placeholder="先选择计量 Key" filterable /></div>
+          <div class="field"><label id="effort-label">推理强度</label><BaseSelect v-model="effort" aria-labelledby="effort-label" :options="effortOptions" :disabled="batch.running" /></div>
+          <div class="field field-narrow"><span class="field-label">每账号次数</span><BaseNumberInput v-model="runs" size="md" label="每账号次数" :min="1" :max="10" :step="1" :disabled="batch.running" /></div>
+          <div class="field field-narrow"><span class="field-label">并发账号</span><BaseNumberInput v-model="parallel" size="md" label="并发账号" :min="1" :max="boot?.parallel_limit ?? 8" :step="1" :disabled="batch.running" /></div>
+          <BaseButton v-if="batch.running" class="run-button" type="submit" :disabled="batch.stopping"><template #icon><Square class="size-3.5" /></template>{{ batch.stopping ? '等待当前请求…' : '停止' }}</BaseButton>
+          <BaseButton v-else class="run-button" variant="primary" type="submit" :disabled="!canRun || !targets.length"><template #icon><Play class="size-4" /></template>{{ selected.size ? '测试所选' : '测试全部' }} ({{ targets.length }})</BaseButton>
+        </form>
+        <p class="toolbar-hint">真实调用计入所选 Key 的用量 · 单次请求限时 {{ boot?.timeout_seconds ?? 100 }} 秒（宿主管理接口上限），高推理强度可能超时 · 出错和中断不计入正确率</p>
+        <div v-if="batch.total" class="batch" role="status">
+          <div class="batch-facts">
+            <span><LoaderCircle v-if="batch.running" class="size-3.5 spin" />{{ batch.running ? (batch.stopping ? '正在停止' : '测试中') : '本轮结束' }} <b class="font-mono">{{ batch.done }}/{{ batch.total }}</b></span>
+            <span class="ok">答对 <b class="font-mono">{{ batch.correct }}</b></span>
+            <span class="bad">答错 <b class="font-mono">{{ batch.wrong }}</b></span>
+            <span class="err">出错 <b class="font-mono">{{ batch.failed }}</b></span>
+            <span v-if="batch.skipped" class="muted">跳过 <b class="font-mono">{{ batch.skipped }}</b></span>
+            <span v-if="batch.correct + batch.wrong" class="muted">本轮正确率 <b class="font-mono">{{ formatPercent(batch.correct / (batch.correct + batch.wrong)) }}</b></span>
+          </div>
+          <progress :value="batch.done" :max="batch.total" aria-label="本轮测试进度" />
         </div>
-        <BaseTable v-else :columns="attemptColumns" :rows="run.attempts.map((a,i)=>({...a,number:i+1,id:i}))" empty-text="尚未发起检测请求"><template #status="{row}"><BaseTag :type="row.status === 'ok' ? 'success' : row.status === 'pending' ? 'primary' : 'warning'">{{ row.status === 'ok' ? '有效' : row.status === 'pending' ? '进行中' : '异常' }}</BaseTag></template><template #answer="{row}"><span class="sample-answer">{{ row.error || row.answer || '—' }}{{ row.answer_truncated ? '（展示已截短，评分使用完整回答）' : '' }}</span></template></BaseTable>
       </template>
     </BaseCard>
+
+    <div v-if="notices.length" class="notice-panel" role="status"><strong>部分账号未完成</strong><ul><li v-for="(note, i) in notices" :key="i">{{ note }}</li></ul></div>
+
+    <div class="legend">
+      <span><StatusMark status="correct" />答对</span>
+      <span><StatusMark status="wrong" />答错</span>
+      <span><StatusMark status="failed" />请求出错 / 中断</span>
+      <span><StatusMark status="correct" dim />其他模型或推理强度</span>
+      <span class="legend-scope">正确率按 <b class="font-mono">{{ scopeLabel }}</b> 统计<template v-if="overall.graded"> · 全部账号 <b class="font-mono">{{ formatPercent(overall.rate!) }}</b>（{{ overall.correct }}/{{ overall.graded }}）</template></span>
+    </div>
+
     <BaseCard>
-      <template #header><div class="flex flex-wrap justify-between gap-3"><div><h2>检测历史</h2><p class="subtitle">保留最近 16 条记录 · 报告沿用检测时的基线，不重新评分</p></div><BaseTag class="self-start">{{ history.length }} 条</BaseTag></div></template>
-      <template #body><BaseTable :columns="historyColumns" :rows="history" :loading="loading" empty-text="还没有检测记录。选择账号，开始第一次检测。"><template #result="{row}"><BaseTag :type="tone(row.report,row.status)">{{ row.status === 'completed' || row.status === 'stopped' ? verdict(row.report,row.status) : statusText[row.status] }}</BaseTag></template><template #actions="{row}"><BaseIconButton :label="`查看 ${row.account_name} 的检测报告`" :disabled="pumping || action" @click="openRun(row.id)"><ArrowRight class="size-4" /></BaseIconButton></template></BaseTable></template>
+      <template #body>
+        <div class="list-head">
+          <div class="list-filters">
+            <h2>账号 <span class="muted font-normal text-cp-sm">{{ rows.length }} / {{ accounts.length }}</span></h2>
+            <BaseSwitch v-model="onlyEnabled" label="仅启用" show-label />
+            <BaseSelect v-model="planFilter" class="plan-filter" aria-label="订阅类型" :options="planOptions" size="sm" />
+            <div class="search"><Search class="size-4" /><BaseInput v-model="search" size="sm" placeholder="搜索邮箱或名称" aria-label="搜索账号" /></div>
+          </div>
+          <BaseIconButton :label="`清空${clearScope}的测试记录`" :disabled="busy || !accounts.some(a => a.records.length)" @click="confirmClear = true"><Trash2 class="size-4" /></BaseIconButton>
+        </div>
+        <p v-if="clearNote" class="muted text-cp-xs" role="status">{{ clearNote }}</p>
+        <p v-if="boot && boot.history_shown < boot.history_limit" class="muted text-cp-xs">账号较多，列表只显示每个账号最近 {{ boot.history_shown }} 次记录（实际保留 {{ boot.history_limit }} 次）。</p>
+        <BaseTable :columns="columns" :rows="rows" :loading="loading" :sort="sort" :selected-row-keys="[...selected]" :expanded-row-keys="[...expanded]" show-header-when-empty empty-text="没有符合条件的账号。请先在主项目启用 OpenAI 账号，或调整筛选。" @sort-change="value => sort = value">
+          <template #header-select><BaseCheckbox :model-value="allChecked" :indeterminate="someChecked" label="选择全部可测试账号" :disabled="batch.running || !visibleTestable.length" @update:model-value="toggleAll" /></template>
+          <template #select="{row}"><BaseCheckbox :model-value="selected.has(row.id)" :label="`选择 ${row.display}`" :disabled="!row.enabled || batch.running" @update:model-value="value => toggleSelect(row.id, value)" /></template>
+          <template #account="{row}">
+            <button type="button" class="account-cell" :aria-expanded="expanded.has(row.id)" :aria-label="`${expanded.has(row.id) ? '收起' : '展开'} ${row.display} 的测试记录`" @click="toggleExpand(row.id)">
+              <ChevronRight class="size-4 chev" :class="{open: expanded.has(row.id)}" />
+              <span class="account-text">
+                <span class="account-name" :title="row.display">{{ row.display }}</span>
+                <span class="account-tags">
+                  <BaseTag size="sm" :type="row.plan_tone">{{ row.plan_label }}</BaseTag>
+                  <BaseTag v-if="!row.enabled" size="sm">已停用</BaseTag>
+                  <BaseTag v-if="credentialStateText(row.credential_state)" size="sm" type="danger">{{ credentialStateText(row.credential_state) }}</BaseTag>
+                </span>
+              </span>
+            </button>
+          </template>
+          <template #latest="{row}">
+            <div v-if="row.last" class="latest">
+              <div class="latest-line"><span class="status-pill" :class="row.last.status"><StatusMark :status="row.last.status" />{{ statusText[row.last.status] }}</span><span class="font-mono text-cp-sm truncate" :class="{muted: !inScope(row.last, model, effort)}">{{ modelLabel(row.last.model, row.last.effort) }}</span></div>
+              <div class="latest-line metrics">
+                <span class="metric" title="耗时"><Clock class="size-3.5" />{{ formatDuration(row.last.duration_ms) }}</span>
+                <span class="metric" title="输入 Token"><ArrowDownToLine class="size-3.5" />{{ formatNumber(row.last.input_tokens) }}</span>
+                <span class="metric" title="输出 Token"><ArrowUpFromLine class="size-3.5" />{{ formatNumber(row.last.output_tokens) }}</span>
+                <span v-if="row.last.reasoning_tokens" class="metric" title="推理 Token"><Brain class="size-3.5" />{{ formatNumber(row.last.reasoning_tokens) }}</span>
+              </div>
+            </div>
+            <span v-else class="muted">未测试</span>
+          </template>
+          <template #rate="{row}">
+            <div v-if="row.stats.rate !== null" class="rate" :class="rateTone(row.stats.rate)"><b>{{ formatPercent(row.stats.rate) }}</b><small>{{ row.stats.correct }}/{{ row.stats.graded }}</small></div>
+            <span v-else class="muted">—</span>
+          </template>
+          <template #marks="{row}">
+            <div class="marks">
+              <button v-for="r in row.records" :key="r.id" type="button" class="mark-hit" :title="`${formatTime(r.time)} · ${modelLabel(r.model, r.effort)} · ${statusText[r.status]}`" :aria-label="`${formatTime(r.time)} ${modelLabel(r.model, r.effort)} ${statusText[r.status]}`" @click="openRecord(row.id, r.id)"><StatusMark :status="r.status" :dim="!inScope(r, model, effort)" /></button>
+            </div>
+          </template>
+          <template #actions="{row}">
+            <BaseButton v-if="progress.get(row.id)?.started" size="sm" variant="ghost" disabled :aria-label="`测试中 ${progress.get(row.id)!.done}/${progress.get(row.id)!.total}`"><template #icon><LoaderCircle class="size-3.5 spin" /></template><span class="font-mono">{{ progress.get(row.id)!.done }}/{{ progress.get(row.id)!.total }}</span></BaseButton>
+            <BaseButton v-else-if="progress.has(row.id)" size="sm" variant="ghost" disabled>{{ batch.stopping ? '已取消' : '排队中' }}</BaseButton>
+            <BaseButton v-else size="sm" variant="soft" :disabled="!row.enabled || row.running || !canRun" :aria-label="`测试 ${row.display}`" @click="runOne(row.id)"><template #icon><Play class="size-3.5" /></template>测试</BaseButton>
+          </template>
+          <template #expanded="{row}"><RecordHistory :account-id="row.id" :records="row.records" :model="model" :effort="effort" :focus="focus[row.id]" /></template>
+        </BaseTable>
+      </template>
     </BaseCard>
+
+    <BaseConfirmModal v-model="confirmClear" title="清空测试记录" :description="`将删除${clearScope}的全部糖果题记录，正确率随之重置。正在测试的账号会被跳过。`" destructive confirm-text="清空" :loading="clearing" @confirm="clearRecords" />
   </main>
 </template>

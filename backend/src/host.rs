@@ -1,5 +1,5 @@
 use crate::{
-    domain::{AccountIdentity, Run},
+    candy::{Answer, History, ResponseParser},
     invalid,
 };
 use gateway_plugin_sdk::{
@@ -8,8 +8,11 @@ use gateway_plugin_sdk::{
     client::HostClient,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use serde_json::json;
+use std::{collections::BTreeSet, time::Duration};
+use tokio::time::{Instant, timeout_at};
+
+const NAMESPACE: &str = "candy";
 
 pub async fn metadata<I: Serialize, O: DeserializeOwned>(
     host: &HostClient,
@@ -45,6 +48,7 @@ async fn payload<I: Serialize, O: DeserializeOwned>(
     serde_json::from_slice(&reply.payload).map_err(|_| invalid("宿主账号回调响应格式错误"))
 }
 
+/// 列出全部 OpenAI 账号（含已停用），页面据此显示状态；只有启用的账号可以测试
 pub async fn accounts(host: &HostClient) -> Result<Vec<AuthRuntimeAccount>, PluginFault> {
     let mut cursor = None;
     let mut seen = BTreeSet::new();
@@ -63,7 +67,7 @@ pub async fn accounts(host: &HostClient) -> Result<Vec<AuthRuntimeAccount>, Plug
         accounts.extend(
             page.accounts
                 .into_iter()
-                .filter(|a| a.enabled && a.provider_id == "openai"),
+                .filter(|a| a.provider_id == "openai"),
         );
         cursor = page.next_cursor;
         let Some(next) = &cursor else {
@@ -104,69 +108,36 @@ pub async fn models(host: &HostClient, key: &str) -> Result<ModelListResult, Plu
     )
     .await
 }
-pub fn account_identity(account: &AuthRuntimeAccount) -> AccountIdentity {
-    AccountIdentity {
-        authentication_kind: account.authentication_kind.clone(),
-        upstream_user_id: account.upstream_user_id.clone(),
-        upstream_account_id: account.upstream_account_id.clone(),
-    }
-}
 
-pub async fn validate_account(host: &HostClient, run: &mut Run) -> Result<(), PluginFault> {
+/// 每次作答前重新确认账号仍启用且属于 OpenAI 平台
+pub async fn testable_account(
+    host: &HostClient,
+    account_id: &str,
+) -> Result<AuthRuntimeAccount, PluginFault> {
     let account: AuthRuntimeAccount = payload(
         host,
         "host.auth.get_runtime",
         AuthGetRequest {
-            account_id: run.account_id.clone(),
+            account_id: account_id.into(),
         },
     )
     .await?;
-    if !account.enabled || account.provider_id != "openai" || account.account_id != run.account_id {
-        return Err(invalid(
-            "检测账号已停用或所属账号/平台发生变化，请检查账号状态",
-        ));
+    if !account.enabled || account.provider_id != "openai" || account.account_id != account_id {
+        return Err(invalid("账号已停用或不再是 OpenAI 账号，请刷新列表"));
     }
-    let identity = account_identity(&account);
-    let revision_changed = account.credential_revision != run.credential_revision;
-    match &run.account_identity {
-        Some(expected) if expected != &identity => {
-            return Err(invalid(
-                "账号身份已改变，请结束当前检测后新建，避免混合不同账号的样本",
-            ));
-        }
-        None if revision_changed && !run.attempts.is_empty() => {
-            // 旧记录没有上游身份快照，不能用当前身份反填已完成样本的归属。
-            return Err(invalid(
-                "这条旧检测缺少账号身份快照且凭据已更新，请结束后新建检测；历史结果保留",
-            ));
-        }
-        _ => {}
-    }
-    let has_identity = [
-        identity.upstream_user_id.as_deref(),
-        identity.upstream_account_id.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|id| !id.is_empty());
-    if revision_changed && !has_identity && !run.attempts.is_empty() {
-        return Err(invalid(
-            "该账号缺少稳定的上游身份且凭据已更新，请结束后新建检测",
-        ));
-    }
-    // Cookie 回写、刷新退避和令牌轮换都会推进 revision；它不是账号身份版本。
-    // 随同 pending/续测状态一起保存本次检查值，不冒充实际发送后的凭据版本。
-    run.account_identity = Some(identity);
-    run.credential_revision = account.credential_revision;
-    Ok(())
+    Ok(account)
 }
-pub async fn read(host: &HostClient, slot: usize) -> Result<Option<(Run, u64)>, PluginFault> {
+
+pub async fn read(
+    host: &HostClient,
+    account_id: &str,
+) -> Result<Option<(History, u64)>, PluginFault> {
     let reply: StateGetResult = metadata(
         host,
         "host.state.get",
         StateGetRequest {
-            namespace: "runs".into(),
-            key: format!("run-{slot}"),
+            namespace: NAMESPACE.into(),
+            key: account_id.into(),
         },
     )
     .await?;
@@ -174,19 +145,36 @@ pub async fn read(host: &HostClient, slot: usize) -> Result<Option<(Run, u64)>, 
         .record
         .map(|r| {
             serde_json::from_value(r.value)
-                .map(|run| (run, r.version))
-                .map_err(|_| invalid("检测状态格式错误"))
+                .map(|history| (history, r.version))
+                .map_err(|_| invalid("测试记录格式错误"))
         })
         .transpose()
 }
-pub async fn write(host: &HostClient, run: &Run, version: Option<u64>) -> Result<(), PluginFault> {
+pub async fn write(
+    host: &HostClient,
+    history: &History,
+    version: Option<u64>,
+) -> Result<(), PluginFault> {
     let _: StatePutResult = metadata(
         host,
         "host.state.put",
         StatePutRequest {
-            namespace: "runs".into(),
-            key: format!("run-{}", run.slot),
-            value: serde_json::to_value(run).map_err(|_| invalid("状态编码失败"))?,
+            namespace: NAMESPACE.into(),
+            key: history.account_id.clone(),
+            value: serde_json::to_value(history).map_err(|_| invalid("状态编码失败"))?,
+            expected_version: version,
+        },
+    )
+    .await?;
+    Ok(())
+}
+pub async fn delete(host: &HostClient, account_id: &str, version: u64) -> Result<(), PluginFault> {
+    let _: StateDeleteResult = metadata(
+        host,
+        "host.state.delete",
+        StateDeleteRequest {
+            namespace: NAMESPACE.into(),
+            key: account_id.into(),
             expected_version: version,
         },
     )
@@ -194,62 +182,63 @@ pub async fn write(host: &HostClient, run: &Run, version: Option<u64>) -> Result
     Ok(())
 }
 
-pub struct ExecutionFailure {
+pub struct Execution {
     pub request_id: Option<String>,
-    pub fault: PluginFault,
-}
-impl From<PluginFault> for ExecutionFailure {
-    fn from(fault: PluginFault) -> Self {
-        Self {
-            request_id: None,
-            fault,
-        }
-    }
+    pub result: Result<Answer, String>,
 }
 
-pub async fn execute(
+/// 显式绑定账号、Key、provider 与协议发送一次请求；整次请求受 `limit` 约束，超时即关闭执行流
+pub async fn ask(
     host: &HostClient,
-    run: &Run,
-    body: Value,
-) -> Result<(String, String), ExecutionFailure> {
+    account_id: &str,
+    key_id: &str,
+    model: &str,
+    body: serde_json::Value,
+    limit: Duration,
+) -> Execution {
+    let deadline = Instant::now() + limit;
+    let timeout = || format!("单次请求达到 {} 秒上限", limit.as_secs());
     let request = ModelExecuteRequest {
-        client_key_id: Some(run.key_id.clone()),
-        model: run.plan["request_model"]
-            .as_str()
-            .ok_or_else(|| invalid("缺少模型"))?
-            .into(),
+        client_key_id: Some(key_id.into()),
+        model: model.into(),
         protocol: "openai".into(),
         operation: ModelOperation::Generate,
         provider: Some("openai".into()),
-        account_id: Some(run.account_id.clone()),
+        account_id: Some(account_id.into()),
         previous_response_id: None,
     };
-    let reply = host
-        .call(
-            "host.model.execute_stream",
-            serde_json::to_value(request).map_err(|_| invalid("模型元数据编码失败"))?,
-            serde_json::to_vec(&body).map_err(|_| invalid("模型正文编码失败"))?,
-        )
-        .await
-        .map_err(|e| e.into_plugin_fault())?;
-    let result: ModelStreamResult =
-        serde_json::from_value(reply.result).map_err(|_| invalid("模型响应缺少请求 ID"))?;
-    let read = tokio::time::timeout(
-        std::time::Duration::from_secs(90),
-        read_stream(host, &result.stream),
+    let failed = |message: String| Execution {
+        request_id: None,
+        result: Err(message),
+    };
+    let (Ok(metadata), Ok(body)) = (serde_json::to_value(request), serde_json::to_vec(&body))
+    else {
+        return failed("模型请求编码失败".into());
+    };
+    let reply = match timeout_at(
+        deadline,
+        host.call("host.model.execute_stream", metadata, body),
     )
-    .await;
-    match read {
-        Ok(Ok(sse)) => Ok((result.request_id, sse)),
+    .await
+    {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(error)) => return failed(error.into_plugin_fault().message),
+        Err(_) => return failed(timeout()),
+    };
+    let Ok(started) = serde_json::from_value::<ModelStreamResult>(reply.result) else {
+        return failed("模型响应缺少请求 ID".into());
+    };
+    let result = match timeout_at(deadline, read_stream(host, &started.stream)).await {
+        Ok(Ok(answer)) => Ok(answer),
         other => {
             let mut message = match other {
-                Ok(Err(e)) => e.message,
-                _ => "单题达到 90 秒上限".into(),
+                Ok(Err(message)) => message,
+                _ => timeout(),
             };
             let close = host
                 .call(
                     "host.model.stream_close",
-                    json!({"stream":result.stream}),
+                    json!({"stream":started.stream}),
                     vec![],
                 )
                 .await;
@@ -259,16 +248,17 @@ pub async fn execute(
                     error.into_plugin_fault().message
                 ));
             }
-            Err(ExecutionFailure {
-                request_id: Some(result.request_id),
-                fault: invalid(message),
-            })
+            Err(message)
         }
+    };
+    Execution {
+        request_id: Some(started.request_id),
+        result,
     }
 }
 
-async fn read_stream(host: &HostClient, stream: &str) -> Result<String, PluginFault> {
-    let mut sse = String::new();
+async fn read_stream(host: &HostClient, stream: &str) -> Result<Answer, String> {
+    let mut parser = ResponseParser::default();
     loop {
         let reply = host
             .call(
@@ -277,41 +267,35 @@ async fn read_stream(host: &HostClient, stream: &str) -> Result<String, PluginFa
                 vec![],
             )
             .await
-            .map_err(|e| e.into_plugin_fault())?;
+            .map_err(|e| e.into_plugin_fault().message)?;
         let state: ModelStreamReadResult =
-            serde_json::from_value(reply.result).map_err(|_| invalid("模型流状态格式错误"))?;
+            serde_json::from_value(reply.result).map_err(|_| "模型流状态格式错误".to_string())?;
         let batch = if reply.payload.is_empty() && state.events == 0 {
             ModelEventBatch::default()
         } else {
-            ModelEventBatch::decode(&reply.payload).map_err(|_| invalid("模型事件批次格式错误"))?
+            ModelEventBatch::decode(&reply.payload)
+                .map_err(|_| "模型事件批次格式错误".to_string())?
         };
         if batch.events.len() != state.events as usize {
-            return Err(invalid("模型事件数量不一致"));
+            return Err("模型事件数量不一致".into());
         }
         for event in batch.events {
             let Some(wire) = event.wire else {
                 continue;
             };
             if wire.protocol != "openai" {
-                return Err(invalid("模型返回了不匹配的协议"));
+                return Err("模型返回了不匹配的协议".into());
             }
             match wire.payload {
-                WirePayload::Json { data, .. } => {
-                    sse.push_str("data: ");
-                    sse.push_str(&data.to_string());
-                    sse.push_str("\n\n");
-                }
-                WirePayload::RawSse { frame } => {
-                    sse.push_str(std::str::from_utf8(&frame).map_err(|_| invalid("SSE 编码错误"))?)
-                }
-                _ => return Err(invalid("模型未返回 Responses SSE；检测中止以免误评分")),
-            }
-            if sse.len() > 1024 * 1024 {
-                return Err(invalid("检测响应超过 1 MiB"));
+                WirePayload::Json { data, .. } => parser.feed(&data)?,
+                WirePayload::RawSse { frame } => parser.feed_sse(
+                    std::str::from_utf8(&frame).map_err(|_| "SSE 编码错误".to_string())?,
+                )?,
+                _ => return Err("模型未返回 Responses 流，无法判分".into()),
             }
         }
         if state.end {
-            return Ok(sse);
+            return parser.finish();
         }
     }
 }
