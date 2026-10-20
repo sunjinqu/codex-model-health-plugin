@@ -26,7 +26,7 @@ for ARCH in "${ARCHES[@]}"; do
   docker run --rm --platform "linux/$ARCH" \
     -v "$ROOT:/work" -v "${LINUX_CARGO_CACHE:-$ROOT/.build/cargo}:/cache" \
     -e CARGO_HOME=/cache -e MEOW_ENGINE_BINARY="/work/$ENGINE/meow-engine" \
-    -e CARGO_TARGET_DIR="/work/$TARGET_DIR" -w /work rust:1.97-slim-bookworm \
+    -e CARGO_TARGET_DIR="/work/$TARGET_DIR" -w /work rust:1.99.1-slim-bookworm \
     sh -c 'cargo test --locked --features bundled-engine --manifest-path backend/Cargo.toml && cargo build --locked --release --features bundled-engine --manifest-path backend/Cargo.toml'
   "${CPR_PLUGIN_BIN:-cpr-plugin}" package --manifest "$ROOT/plugin.json" \
     --binary "$ROOT/$TARGET_DIR/release/codex-model-health-plugin" \

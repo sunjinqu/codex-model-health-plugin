@@ -8,11 +8,11 @@ A `trustedProcess` plugin (`local.model-health`) for [Codex Proxy RS](https://gi
 
 ## Commands
 
-The host SDK (`gateway-plugin-sdk`) and packaging CLI are pinned to codex-proxy-rs rev `fef52b3717019513108733549508377a309f129d`. Don't move them to a floating `main`.
+The host SDK (`gateway-plugin-sdk`) and packaging CLI are pinned to codex-proxy-rs rev `af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8`. Don't move them to a floating `main`.
 
 ```sh
 # Full release build (Docker buildx): frontend → per arch: engine → Rust tests+build with bundled-engine → package → smoke test
-cargo install --git https://github.com/zyycn/codex-proxy-rs.git --rev fef52b3717019513108733549508377a309f129d \
+cargo install --git https://github.com/zyycn/codex-proxy-rs.git --rev af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8 \
   --locked --root .tools/cpr-cli codex-proxy-plugin-cli
 CPR_PLUGIN_BIN="$PWD/.tools/cpr-cli/bin/cpr-plugin" ./scripts/build-linux.sh         # amd64 + arm64 → dist/*.tar.gz (+ .sha256)
 CPR_PLUGIN_BIN="$PWD/.tools/cpr-cli/bin/cpr-plugin" ./scripts/build-linux.sh arm64   # one arch; per-arch dirs .build/{engine,linux-target}-<arch>
@@ -77,6 +77,7 @@ Runs live in the plugin-private `runs` state namespace, which has 16 slots (sche
 - Keep detection methods and baselines frozen per run. Don't rescore history against new baselines, and don't mix Meow and ModelTrace scores.
 - Keep account/Key binding explicit, budget counting conservative, and errored samples out of scoring.
 - Changes should come with offline protocol tests (`backend/tests/protocol.rs` uses mocked host callbacks) and browser checks. Don't auto-deploy or trigger real, billed model detections.
+- The SDK rev fixes the plugin wire protocol (`PROTOCOL_VERSION`, which is 4 at v3.29.6, while v3.18 to v3.28 hosts speak 2). A host on a different protocol rejects the install with "插件清单或协议版本不兼容，请使用当前 SDK 重新构建". When you move the rev, also update `plugin.json` `engines`, `PROTOCOL_VERSION` in `scripts/package-smoke.py` (it hand-encodes frames: business JSON goes in a `data_bytes` payload prefix), `CPR_REV` in the workflow, and the `rust:<ver>-slim-bookworm` image in `build-linux.sh` and the workflow to the SDK's `rust-version`.
 - Release targets are Linux x86_64 and aarch64, glibc 2.36+ (built on bookworm images). This repo's GitHub Releases ship the aarch64 package; x86_64 releases live in the upstream R-lmmortal repo.
 - Protocol tests run many plugin instances in one process, so `Engine::bundled()` must keep the per-process sequence in its directory name and `query()` must keep the ETXTBSY spawn retry. Without them, parallel `cargo test` flakes, especially on arm64.
 - A version bump touches `plugin.json`, `backend/Cargo.toml` + `Cargo.lock`, `frontend/package.json`, `README.md`, `NOTICE`, and `scripts/package-smoke.py`.

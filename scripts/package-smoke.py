@@ -18,6 +18,8 @@ continuous = "--continuous" in sys.argv[2:]
 modeltrace = "--modeltrace" in sys.argv[2:]
 updates_live = "--updates-live" in sys.argv[2:]
 updates = "--updates" in sys.argv[2:] or updates_live
+# 与 backend/Cargo.toml 固定的宿主 SDK 提交一致（codex-proxy-rs v3.29.6）
+PROTOCOL_VERSION = 4
 
 
 def assert_same(actual, expected, path="run"):
@@ -69,9 +71,27 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
                'exec /usr/bin/env -i ./bin/plugin']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 
+    # SDK 协议 4：业务 JSON（握手配置、调用参数、结果）不进控制元数据，
+    # 以 data_bytes 声明长度放在载荷前缀；Call 的入口快照另有 request_context_bytes 前缀。
+    def data_slot(message):
+        kind = message["type"]
+        if kind == "hello":
+            return message["handshake"], "configuration"
+        if kind in ("call", "callback"):
+            return message, "params"
+        if kind == "result":
+            return message, "result"
+        return None, None
+
     def send(message, payload=b""):
+        message = json.loads(json.dumps(message))
+        owner, field = data_slot(message)
+        data = b""
+        if owner is not None:
+            data = json.dumps(owner.pop(field), separators=(",", ":")).encode()
+            message["data_bytes"] = len(data)
         body = json.dumps(message, separators=(",", ":")).encode()
-        process.stdin.write(struct.pack(">IQ", len(body), len(payload)) + body + payload)
+        process.stdin.write(struct.pack(">IQ", len(body), len(data) + len(payload)) + body + data + payload)
         process.stdin.flush()
 
     def read_exact(length):
@@ -86,9 +106,17 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
         return result
 
     def receive():
-        meta, payload = struct.unpack(">IQ", read_exact(12))
-        assert 0 < meta <= 65536 and payload < 2 * 1024 * 1024
-        return json.loads(read_exact(meta)), read_exact(payload)
+        meta, total = struct.unpack(">IQ", read_exact(12))
+        assert 0 < meta <= 65536 and total < 2 * 1024 * 1024
+        message = json.loads(read_exact(meta))
+        request_bytes = message.pop("request_context_bytes", 0)
+        data_bytes = message.pop("data_bytes", 0)
+        assert request_bytes == 0, "plugin frames never carry an ingress request snapshot"
+        owner, field = data_slot(message)
+        assert (owner is not None) == (data_bytes > 0), message
+        if owner is not None:
+            owner[field] = json.loads(read_exact(data_bytes))
+        return message, read_exact(total - data_bytes)
 
     host = {"executions": 0, "state": {}, "callbacks": [], "numeric": False, "http_body": None}
 
@@ -207,9 +235,10 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
             send({"type": "result", "id": message["id"], "result": result}, response)
 
     try:
-        send({"type": "hello", "handshake": {"protocol_version": 2, "artifact_sha256": hashlib.sha256(package.read_bytes()).hexdigest(), "plugin_id": "local.model-health", "instance_id": "smoke", "generation": 1, "incarnation": "smoke", "configuration": {}, "contributes": manifest["contributes"]}})
+        assert manifest["package"]["protocolVersion"] == PROTOCOL_VERSION, manifest["package"]
+        send({"type": "hello", "handshake": {"protocol_version": PROTOCOL_VERSION, "artifact_sha256": hashlib.sha256(package.read_bytes()).hexdigest(), "plugin_id": "local.model-health", "instance_id": "smoke", "generation": 1, "incarnation": "smoke", "configuration": {}, "contributes": manifest["contributes"]}})
         ready, _ = receive()
-        assert ready["type"] == "ready"
+        assert ready["type"] == "ready" and ready["protocol_version"] == PROTOCOL_VERSION, ready
         context = {"call_id": 1, "instance_id": "smoke", "generation": 1, "incarnation": "smoke", "stage": "management", "timeout_ms": 120000, "resource_stream": False, "resource_scope_id": "smoke", "request_id": None, "attempt_id": None, "account_id": None, "credential_revision": None}
         status, boot = api("api/bootstrap")
         assert status == 200, boot

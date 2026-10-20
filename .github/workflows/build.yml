@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
-      CPR_REV: fef52b3717019513108733549508377a309f129d
+      CPR_REV: af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8
     steps:
       - uses: actions/checkout@v7
 
@@ -47,7 +47,7 @@ jobs:
       - name: Install packaging CLI
         if: steps.cli-cache.outputs.cache-hit != 'true'
         run: |
-          docker run --rm -v "$PWD/.tools:/tools" rust:1.97-slim-bookworm \
+          docker run --rm -v "$PWD/.tools:/tools" rust:1.99.1-slim-bookworm \
             cargo install --git https://github.com/zyycn/codex-proxy-rs.git --rev "$CPR_REV" \
             --locked --root /tools/cpr-cli codex-proxy-plugin-cli
 
@@ -75,7 +75,7 @@ jobs:
             cat > release-notes.md <<EOF
           提供 **Linux ARM64（aarch64）** 安装包，由 GitHub Actions 构建并通过离线协议冒烟验收。
 
-          **适用平台**：Linux aarch64，glibc 2.36+（如 Debian 12、Ubuntu 24.04）；宿主 Codex Proxy RS \`>=3.19.0, <4.0.0\`。
+          **适用平台**：Linux aarch64，glibc 2.36+（如 Debian 12、Ubuntu 24.04）；宿主 Codex Proxy RS \`>=3.29.0, <4.0.0\`。
 
           **安装**：插件管理 → 安装插件 → GitHub，仓库填 \`$GITHUB_REPOSITORY\`、版本标签 \`$TAG\`，选择 \`$PACKAGE\`。也可下载后通过「上传包」安装；不要上传 GitHub 自动生成的 Source code 压缩包。
 
