@@ -26,7 +26,7 @@
 | 项目 | 当前支持 |
 | --- | --- |
 | 插件 ID / 版本 | `local.model-health` / `0.3.0` |
-| 宿主清单范围 | `>=3.29.0, <4.0.0`（插件协议 4）；v3.18 ~ v3.28 的宿主请使用 [v0.2.2](https://github.com/sunjinqu/codex-model-health-plugin/releases/tag/v0.2.2) |
+| 宿主清单范围 | `>=3.29.0, <4.0.0`（插件协议 4）；更早的宿主（插件协议 2）不再提供安装包 |
 | Release 平台 | Linux ARM64（aarch64），glibc 2.36+（如 Debian 12、Ubuntu 24.04）；x86_64 包见[原仓库 Releases](https://github.com/R-lmmortal/codex-model-health-plugin/releases)或按下文自行构建；不适用于 Alpine/musl 或 Windows |
 | 运行方式 | `trustedProcess`，插件以宿主系统身份运行，安装代表完整信任；不是操作系统沙箱 |
 | 扩展能力 | 独立管理页面；不注册请求中间件、调度器、观察器或自动维护任务 |
