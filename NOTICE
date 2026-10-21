@@ -1,4 +1,4 @@
-账号降智测试 / Codex Proxy Model Health 0.4.0
+账号降智测试 / Codex Proxy Model Health 0.4.1
 
 This plugin's own code is distributed under PolyForm Noncommercial 1.0.0, see LICENSE.
 
@@ -7,7 +7,7 @@ names are adapted from haowang02/codex-candy-eval and
 haowang02/cpa-plugin-codex-candy-eval, MIT licensed (notice below).
 Source: https://github.com/haowang02/cpa-plugin-codex-candy-eval
 
-Host SDK: zyycn/codex-proxy-rs at af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8, Apache-2.0.
+Host SDK: zyycn/codex-proxy-rs at 78bc57c5cf24b01a38e985cdd739bb4ae89ce11f, Apache-2.0.
 UI: zyycn/codex-proxy-ui v0.3.2, Apache-2.0.
 The page bundles marked 18.0.14 (MIT) and DOMPurify 3.4.16 (Apache-2.0, dual
 licensed with MPL-2.0; used here under Apache-2.0, text in the SDK section).

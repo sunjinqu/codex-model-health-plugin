@@ -16,7 +16,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "codex-model-health-plugin"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "gateway-plugin-sdk",
  "serde",
@@ -27,7 +27,7 @@ dependencies = [
 [[package]]
 name = "gateway-plugin-sdk"
 version = "0.1.0"
-source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8#af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8"
+source = "git+https://github.com/zyycn/codex-proxy-rs.git?rev=78bc57c5cf24b01a38e985cdd739bb4ae89ce11f#78bc57c5cf24b01a38e985cdd739bb4ae89ce11f"
 dependencies = [
  "base64",
  "semver",

@@ -287,7 +287,11 @@ async fn read_stream(host: &HostClient, stream: &str) -> Result<Answer, String> 
                 return Err("模型返回了不匹配的协议".into());
             }
             match wire.payload {
-                WirePayload::Json { data, .. } => parser.feed(&data)?,
+                // 协议 5 起，上游走 WebSocket 时事件以 WebSocket 原文交付，解析视图同样可判分
+                WirePayload::Json { data, .. }
+                | WirePayload::WebSocket {
+                    data: Some(data), ..
+                } => parser.feed(&data)?,
                 WirePayload::RawSse { frame } => parser.feed_sse(
                     std::str::from_utf8(&frame).map_err(|_| "SSE 编码错误".to_string())?,
                 )?,

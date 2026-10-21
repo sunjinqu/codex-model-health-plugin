@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
-      CPR_REV: af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8
+      CPR_REV: 78bc57c5cf24b01a38e985cdd739bb4ae89ce11f
     steps:
       - uses: actions/checkout@v7
 
@@ -75,7 +75,7 @@ jobs:
             cat > release-notes.md <<EOF
           提供 **Linux ARM64（aarch64）** 安装包，由 GitHub Actions 构建并通过离线协议冒烟验收。
 
-          **适用平台**：Linux aarch64，glibc 2.36+（如 Debian 12、Ubuntu 24.04）；宿主 Codex Proxy RS \`>=3.29.0, <4.0.0\`。
+          **适用平台**：Linux aarch64，glibc 2.36+（如 Debian 12、Ubuntu 24.04）；宿主 Codex Proxy RS \`>=3.29.7, <4.0.0\`。
 
           **安装**：插件管理 → 安装插件 → GitHub，仓库填 \`$GITHUB_REPOSITORY\`、版本标签 \`$TAG\`，选择 \`$PACKAGE\`。也可下载后通过「上传包」安装；不要上传 GitHub 自动生成的 Source code 压缩包。
 

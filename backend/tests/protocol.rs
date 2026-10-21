@@ -142,6 +142,7 @@ struct Host {
     answer: String,
     fail: bool,
     raw_sse: bool,
+    websocket: bool,
     repeat_cursor: bool,
     callbacks: Vec<String>,
     closed: usize,
@@ -155,6 +156,7 @@ impl Default for Host {
             answer: "最少需要 21 个糖果".into(),
             fail: false,
             raw_sse: false,
+            websocket: false,
             repeat_cursor: false,
             callbacks: vec![],
             closed: 0,
@@ -293,6 +295,12 @@ impl Host {
                     WirePayload::RawSse {
                         frame: format!("event: response.completed\ndata: {data}\n\n").into_bytes(),
                     }
+                } else if self.websocket {
+                    WirePayload::WebSocket {
+                        event: Some("response.completed".into()),
+                        message: data.to_string().into_bytes(),
+                        data: Some(data),
+                    }
                 } else {
                     WirePayload::Json {
                         event: None,
@@ -393,6 +401,19 @@ async fn answers_are_graded_persisted_and_bound_to_the_selected_account_and_key(
     let boot = peer.api("api/bootstrap", None, &mut host).await.unwrap();
     assert_eq!(boot["accounts"][0]["records"].as_array().unwrap().len(), 2);
     assert_eq!(boot["accounts"][1]["records"], json!([]));
+}
+
+#[tokio::test]
+async fn websocket_upstream_events_are_graded() {
+    let mut peer = Peer::new().await;
+    let mut host = Host {
+        websocket: true,
+        ..Host::default()
+    };
+    let correct = peer.run("account-a", "low", &mut host).await.unwrap();
+    assert_eq!(correct["record"]["status"], "correct");
+    assert_eq!(correct["record"]["input_tokens"], 310);
+    assert_eq!(correct["record"]["reasoning_tokens"], 20);
 }
 
 #[tokio::test]

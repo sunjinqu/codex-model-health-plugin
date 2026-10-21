@@ -11,8 +11,8 @@ import tempfile
 from pathlib import Path
 
 package = Path(sys.argv[1]).resolve()
-# 与 backend/Cargo.toml 固定的宿主 SDK 提交一致（codex-proxy-rs v3.29.6）
-PROTOCOL_VERSION = 4
+# 与 backend/Cargo.toml 固定的宿主 SDK 提交一致（codex-proxy-rs v3.29.7）
+PROTOCOL_VERSION = 5
 
 with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
     root = Path(directory).resolve()
@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
                'exec /usr/bin/env -i ./bin/plugin']
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 
-    # SDK 协议 4：业务 JSON（握手配置、调用参数、结果）不进控制元数据，
+    # SDK 协议 5：业务 JSON（握手配置、调用参数、结果）不进控制元数据，
     # 以 data_bytes 声明长度放在载荷前缀；Call 的入口快照另有 request_context_bytes 前缀。
     def data_slot(message):
         kind = message["type"]

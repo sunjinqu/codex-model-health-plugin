@@ -2,7 +2,7 @@
 
 为 [Codex Proxy RS](https://github.com/zyycn/codex-proxy-rs) 提供独立的账号降智测试页面：用一道**糖果题**（正确答案 21）批量测试已有 OpenAI 账号，按「模型 + 推理强度」统计每个账号的正确率，正确率明显偏低的账号可能被降智。请求经主服务原有的代理和凭据发出，不需要再填写 API 地址或密钥，也不修改主项目。
 
-[下载 v0.4.0](https://github.com/sunjinqu/codex-model-health-plugin/releases/tag/v0.4.0) · [反馈问题](https://github.com/sunjinqu/codex-model-health-plugin/issues) · [插件使用规范](https://github.com/zyycn/codex-proxy-rs/blob/main/docs/plugins.md)
+[下载 v0.4.1](https://github.com/sunjinqu/codex-model-health-plugin/releases/tag/v0.4.1) · [反馈问题](https://github.com/sunjinqu/codex-model-health-plugin/issues) · [插件使用规范](https://github.com/zyycn/codex-proxy-rs/blob/main/docs/plugins.md)
 
 > 本仓库基于 [R-lmmortal/codex-model-health-plugin](https://github.com/R-lmmortal/codex-model-health-plugin)，增加了 Linux ARM64（aarch64）构建。从 v0.4.0 起移除 Meow / ModelTrace 行为指纹检测，改为糖果题降智测试，页面参照 [cpa-plugin-codex-candy-eval](https://github.com/haowang02/cpa-plugin-codex-candy-eval) 的糖果题页面重做。
 
@@ -14,14 +14,14 @@
 | --- | --- | --- |
 | [codex-candy-eval](https://github.com/haowang02/codex-candy-eval) / [cpa-plugin-codex-candy-eval](https://github.com/haowang02/cpa-plugin-codex-candy-eval) — haowang02 | 糖果题题目、「独立出现的 21 即答对」判分规则、订阅类型名称，页面布局参考 | MIT |
 
-宿主集成使用 [Codex Proxy 公开 SDK](https://github.com/zyycn/codex-proxy-rs/tree/af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8/backend/crates/gateway-plugin/sdk) 与 [@codex-proxy/ui](https://github.com/zyycn/codex-proxy-ui) v0.3.2。插件自身代码按 [PolyForm Noncommercial 1.0.0](LICENSE) 分发，第三方组件保留各自的许可证，详见 [NOTICE](NOTICE)，安装包中也附带这两个文件。
+宿主集成使用 [Codex Proxy 公开 SDK](https://github.com/zyycn/codex-proxy-rs/tree/78bc57c5cf24b01a38e985cdd739bb4ae89ce11f/backend/crates/gateway-plugin/sdk) 与 [@codex-proxy/ui](https://github.com/zyycn/codex-proxy-ui) v0.3.2。插件自身代码按 [PolyForm Noncommercial 1.0.0](LICENSE) 分发，第三方组件保留各自的许可证，详见 [NOTICE](NOTICE)，安装包中也附带这两个文件。
 
 ## 安装与兼容性
 
 | 项目 | 当前支持 |
 | --- | --- |
-| 插件 ID / 版本 | `local.model-health` / `0.4.0` |
-| 宿主清单范围 | `>=3.29.0, <4.0.0`（插件协议 4） |
+| 插件 ID / 版本 | `local.model-health` / `0.4.1` |
+| 宿主清单范围 | `>=3.29.7, <4.0.0`（插件协议 5） |
 | Release 平台 | Linux ARM64（aarch64），glibc 2.36+（如 Debian 12、Ubuntu 24.04）；x86_64 可按下文自行构建；不适用于 Alpine/musl 或 Windows |
 | 运行方式 | `trustedProcess`，插件以宿主系统身份运行，安装代表完整信任；不是操作系统沙箱 |
 | 扩展能力 | 独立管理页面；不注册请求中间件、调度器、观察器或自动维护任务 |
@@ -30,17 +30,21 @@
 
 ```text
 仓库：sunjinqu/codex-model-health-plugin
-版本标签：v0.4.0（或留空查询最新稳定版）
+版本标签：v0.4.1（或留空查询最新稳定版）
 ```
 
-选择 `local.model-health-0.4.0-aarch64-unknown-linux-gnu.tar.gz`，核对平台与摘要后安装并启用。服务器架构可用 `uname -m` 确认（`aarch64` 即 ARM64），glibc 版本可用 `ldd --version` 确认。也可从 [Releases](https://github.com/sunjinqu/codex-model-health-plugin/releases) 下载该文件，通过「上传包」安装。不要上传 GitHub 自动生成的 **Source code (zip/tar.gz)**，那是源码，不是插件制品。
+选择 `local.model-health-0.4.1-aarch64-unknown-linux-gnu.tar.gz`，核对平台与摘要后安装并启用。服务器架构可用 `uname -m` 确认（`aarch64` 即 ARM64），glibc 版本可用 `ldd --version` 确认。也可从 [Releases](https://github.com/sunjinqu/codex-model-health-plugin/releases) 下载该文件，通过「上传包」安装。不要上传 GitHub 自动生成的 **Source code (zip/tar.gz)**，那是源码，不是插件制品。
 
 Release 同时提供同名 `.tar.gz.sha256`，下载两个附件后可以校验：
 
 ```sh
-sha256sum -c local.model-health-0.4.0-aarch64-unknown-linux-gnu.tar.gz.sha256
-# macOS：shasum -a 256 -c local.model-health-0.4.0-aarch64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c local.model-health-0.4.1-aarch64-unknown-linux-gnu.tar.gz.sha256
+# macOS：shasum -a 256 -c local.model-health-0.4.1-aarch64-unknown-linux-gnu.tar.gz.sha256
 ```
+
+### 宿主版本
+
+0.4.1 起使用宿主 v3.29.7 的插件协议 5，与 v3.29.0–v3.29.6 的协议 4 互不兼容：先把主服务升级到 v3.29.7 或更新版本，再把插件更新到 0.4.1；仍在 v3.29.0–v3.29.6 的主服务继续使用 [v0.4.0](https://github.com/sunjinqu/codex-model-health-plugin/releases/tag/v0.4.0)。主服务升级重启时会把本插件列为不兼容；升级后旧包握手失败、无法启动，但启用配置和测试记录都会保留，在插件管理中更新到 0.4.1 即可恢复。
 
 ### 从 0.3.x 升级
 
@@ -76,11 +80,11 @@ sha256sum -c local.model-health-0.4.0-aarch64-unknown-linux-gnu.tar.gz.sha256
 
 ## 构建与验证
 
-构建工具：Docker、Node 24+、pnpm 10.10、Python 3.9+（安装包冒烟测试）、Rust 1.99.1（构建打包 CLI）。SDK 与 CLI 固定在同一个宿主提交 `af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8`，前端依赖锁定在 `frontend/pnpm-lock.yaml`，不要换成浮动的 `main`。在仓库根目录执行：
+构建工具：Docker、Node 24+、pnpm 10.10、Python 3.9+（安装包冒烟测试）、Rust 1.99.1（构建打包 CLI）。SDK 与 CLI 固定在同一个宿主提交 `78bc57c5cf24b01a38e985cdd739bb4ae89ce11f`，前端依赖锁定在 `frontend/pnpm-lock.yaml`，不要换成浮动的 `main`。在仓库根目录执行：
 
 ```sh
 cargo install --git https://github.com/zyycn/codex-proxy-rs.git \
-  --rev af35cde3744b7afc81c4ad6e1e9c9c76bbbd68b8 \
+  --rev 78bc57c5cf24b01a38e985cdd739bb4ae89ce11f \
   --locked --root .tools/cpr-cli codex-proxy-plugin-cli
 CPR_PLUGIN_BIN="$PWD/.tools/cpr-cli/bin/cpr-plugin" ./scripts/build-linux.sh          # amd64 + arm64
 CPR_PLUGIN_BIN="$PWD/.tools/cpr-cli/bin/cpr-plugin" ./scripts/build-linux.sh arm64    # 只构建 ARM64
@@ -104,7 +108,7 @@ node scripts/browser-qa.mjs                            # 需要 PLAYWRIGHT_PATH 
 
 不想占用本地空间时，用 [.github/workflows/build.yml](.github/workflows/build.yml) 在 GitHub 的 ARM64 原生 runner 上执行同一个 `build-linux.sh arm64`，本地不需要 Docker、Rust 或前端依赖：
 
-- 先把 `plugin.json` 等文件的版本号改好并推送，再推送同版本标签（如 `git tag v0.4.0 && git push origin v0.4.0`）。工作流会自动构建、测试、冒烟验收，并发布到同名 Release；Release 已存在时覆盖其中的安装包。标签与 `plugin.json` 版本不一致时直接失败。
+- 先把 `plugin.json` 等文件的版本号改好并推送，再推送同版本标签（如 `git tag v0.4.1 && git push origin v0.4.1`）。工作流会自动构建、测试、冒烟验收，并发布到同名 Release；Release 已存在时覆盖其中的安装包。标签与 `plugin.json` 版本不一致时直接失败。
 - 在仓库 Actions 页面手动运行「Build ARM64 package」只做构建验收，安装包作为 artifact 下载，不改动 Release。
 
 ## 回退
